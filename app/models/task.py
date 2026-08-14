@@ -11,6 +11,11 @@ from app.utils.request_builder import RequestBuilder
 # Load the environment variables from the .env file
 load_dotenv()
 
+# Tell the user which agents are working while a request is being handled. Only the final
+# answer is ever sent as a chat message, so without these the client sits silent for the
+# whole tree. Set EMIT_PROGRESS_EVENTS="false" to go back to saying nothing.
+EMIT_PROGRESS_EVENTS = os.getenv('EMIT_PROGRESS_EVENTS', 'true').strip().lower() not in ('false', '0', 'no')
+
 
 class Task:
     def __init__(self, task_id, chat_id, agents, owner, coordinator_agent, current_agent, memories,
@@ -174,6 +179,28 @@ class Task:
         db.update_task_data(top_level_task.to_dict())
         return result
 
+    def _emit_progress(self, socketio, message):
+        """
+        Sends a progress line on the chat_information event.
+
+        This is deliberately a different event from 'message': the client treats a chat
+        message as the end of the request, and progress updates must not stop it waiting.
+        :param socketio: The socketio instance
+        :param message: Human readable text, e.g. "Asking WEATHER, BREWERY"
+        """
+        if not EMIT_PROGRESS_EVENTS:
+            return
+        try:
+            socketio.emit(
+                'chat_information',
+                json.dumps({"type": "progress", "message": message, "chat_id": self.chat_id}),
+                room=self.chat_id,
+                namespace='/chat'
+            )
+        except Exception as e:
+            # Progress is cosmetic; never let it break the task it is reporting on.
+            print(f"[TASK] !! Could not emit progress ({type(e).__name__}: {e})")
+
     def _report_to_parent(self, chat, socketio, give_up_message=None):
         """
         Hands control back up the tree once this task is finished.
@@ -305,6 +332,10 @@ class Task:
             self.pending_children = len(delegated)
             db.update_task_data(self.to_dict())
 
+            names = ", ".join(action_map[a].name for a in delegated)
+            self._emit_progress(socketio, f"Asking {names}…" if len(delegated) == 1
+                                else f"Asking {names} in parallel…")
+
             child_task_ids = []
             for action in delegated:
                 # 3.1.1 Load the agent
@@ -338,6 +369,10 @@ class Task:
         # 3.2 If action selection returns 0 -> Agent is done
         # 3.2.1 Generate a response (if not disabled)
         if not current_agent.skip_response:
+            # Subtasks say nothing here: the parent already announced them when it
+            # delegated, and repeating it just doubles every line.
+            if self.parent_task_id is None:
+                self._emit_progress(socketio, "Writing the answer…")
             response = current_agent.respond(
                 openai_client=openai_client,
                 request_builder=request_builder,
@@ -363,6 +398,9 @@ class Task:
                 return None
         self.completed = True
         db.update_task_data(self.to_dict())
+
+        if self.parent_task_id is not None:
+            self._emit_progress(socketio, f"{current_agent.name} done")
 
         # 3.2.3 If task is a subtask, tell parent task
         # 3.2.3.1 Pass memories to parent task if necessary.
