@@ -26,8 +26,12 @@ class DemoWeatherAgent(Agent):
         :param city:
         :return:
         """
+        # Nominatim's usage policy requires a User-Agent that identifies the application.
+        # Generic browser strings such as "Mozilla/5.0" are answered with 403.
         url = f"https://nominatim.openstreetmap.org/search?city={city}&format=json"
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = requests.get(url, headers={
+            'User-Agent': 'STELLA-demo-weather-agent/0.1 (https://github.com/Norditech-AB/STELLA)'
+        })
         if response.status_code == 200:
             data = response.json()
             if data:
