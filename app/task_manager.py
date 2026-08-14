@@ -34,9 +34,14 @@ class Worker(threading.Thread):
 
             try:
                 task = Task.load(task_id)
-                new_task_id = task.execute(self.agent_storage, self.openai_client, self.manager.socketio, self.request_builder)
-                if new_task_id is not None:
-                    self.manager.add_task(new_task_id)
+                # execute() returns the next task id, a list of them when an agent
+                # delegated to several agents at once, or None when nothing follows.
+                result = task.execute(self.agent_storage, self.openai_client, self.manager.socketio, self.request_builder)
+                if result is not None:
+                    new_task_ids = result if isinstance(result, list) else [result]
+                    for new_task_id in new_task_ids:
+                        if new_task_id is not None:
+                            self.manager.add_task(new_task_id)
             except Exception as e:
                 # Never let an exception escape: it would kill this thread for good,
                 # shrinking the worker pool and leaving the chat stuck on busy=True.

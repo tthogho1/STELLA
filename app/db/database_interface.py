@@ -104,7 +104,8 @@ class DatabaseInterface(ABC):
     @abstractmethod
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
-                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None):
+                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
+                    pending_children=0):
         pass
 
     @abstractmethod
@@ -117,4 +118,32 @@ class DatabaseInterface(ABC):
 
     @abstractmethod
     def delete_task(self, task_id) -> None:
+        pass
+
+    @abstractmethod
+    def append_task_memories(self, task_id, memories) -> None:
+        """
+        Appends memories to a task atomically.
+
+        Several children of the same parent finish at the same time and all forward their
+        memories to it. Doing that as load -> extend -> save from the caller loses
+        whichever update lands first, so the read and the write have to happen as one
+        operation in the database.
+        :param task_id: The task to append to
+        :param memories: A list of memory strings to append
+        """
+        pass
+
+    @abstractmethod
+    def decrement_pending_children(self, task_id) -> int:
+        """
+        Decrements a task's outstanding-children counter and returns the new value.
+
+        This is the join for parallel agent calls: every child decrements when it
+        finishes, and only the one that takes the counter to zero re-queues the parent.
+        Must be atomic, or two children finishing together both read 1 and the parent runs
+        twice (or never).
+        :param task_id: The parent task
+        :return: The counter value after the decrement, never below zero
+        """
         pass

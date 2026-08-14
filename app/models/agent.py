@@ -14,6 +14,11 @@ load_dotenv()
 # tool support); select_action also falls back on its own if a tool call raises.
 USE_TOOL_CALLING = os.getenv('USE_TOOL_CALLING', 'true').strip().lower() not in ('false', '0', 'no')
 
+# When the model asks for several agents in one turn, run them as siblings instead of
+# keeping only the first. Requires tool calling. Set PARALLEL_AGENT_CALLS="false" to keep
+# the one-agent-at-a-time behaviour.
+PARALLEL_AGENT_CALLS = os.getenv('PARALLEL_AGENT_CALLS', 'true').strip().lower() not in ('false', '0', 'no')
+
 
 class Agent:
     """
@@ -29,13 +34,18 @@ class Agent:
                                                    "actions. If there is enough information to " \
                                                    "answer the user's request, or if no available actions are" \
                                                    " relevant to help solve the user's request, respond with '0'. "
-    default_tool_action_selection_instructions = "\n\n==== INSTRUCTIONS ====\n" \
-                                                 "Carefully examine the chat history. Focus on the user's latest " \
-                                                 "request and call the single tool that is most relevant to " \
-                                                 "solving it.\n\nCarefully analyze the provided details from your " \
-                                                 "previous actions. If there is already enough information to " \
-                                                 "answer the user's request, or if none of the other tools are " \
-                                                 "relevant, call the tool that responds to the user."
+    default_tool_action_selection_instructions = \
+        "\n\n==== INSTRUCTIONS ====\n" \
+        "Carefully examine the chat history and focus on the user's latest request.\n\n" \
+        "First read AVAILABLE INFORMATION. It holds the results of the actions already " \
+        "taken for this request. Anything answered there is done: never call a tool to " \
+        "fetch information you have already been given.\n\n" \
+        "If AVAILABLE INFORMATION already covers the whole request, or none of the tools " \
+        "are relevant to it, respond to the user instead of calling anything else.\n\n" \
+        "Otherwise call one tool for each part of the request that is still unanswered. " \
+        "Independent parts are handled at the same time, so call them together in this " \
+        "one turn rather than one at a time. Call each tool at most once, and do not " \
+        "combine responding to the user with any other tool."
     default_system_response_instructions = "\n\n==== INSTRUCTIONS ====\n" \
                                            "Generate an appropriate response to the user's request using the " \
                                            "provided details. Focus on the user's latest message, and use the " \
@@ -227,15 +237,74 @@ class Agent:
         """
         if USE_TOOL_CALLING:
             try:
-                return self._select_action_with_tools(openai_client, action_map, chat, memories)
+                return self._select_actions_with_tools(openai_client, action_map, chat, memories)[0]
             except Exception as e:
                 print(f"[AGENT] Tool-based action selection failed ({type(e).__name__}: {e}), "
                       f"falling back to text-based selection")
 
         return self._select_action_with_text(openai_client, action_map, chat, memories)
 
-    def _select_action_with_tools(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
-                                  memories=None):
+    def select_actions(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None, memories=None):
+        """
+        Like select_action, but may return several actions to run as siblings.
+
+        The model can ask for more than one agent in a single turn, and the task tree can
+        carry them as parallel children. Subclasses that implement their own select_action
+        keep full control: their single choice is honoured as-is.
+        :return: A list of action keys. ["0"] means done. Never empty.
+        """
+        # An agent with hand-written selection logic decides on its own.
+        if type(self).select_action is not Agent.select_action:
+            return [str(self.select_action(openai_client, action_map, chat, memories))]
+
+        if USE_TOOL_CALLING:
+            try:
+                actions = self._select_actions_with_tools(openai_client, action_map, chat, memories)
+                if actions:
+                    return actions
+            except Exception as e:
+                print(f"[AGENT] Tool-based action selection failed ({type(e).__name__}: {e}), "
+                      f"falling back to text-based selection")
+
+        return [self._select_action_with_text(openai_client, action_map, chat, memories)]
+
+    def _select_actions_with_tools(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
+                                   memories=None):
+        tool_calls, tool_name_to_action = self._request_tool_selection(
+            openai_client, action_map, chat, memories)
+
+        if not tool_calls:
+            print(f"[AGENT] {self.name} returned no tool call, defaulting to 0 (done)")
+            return [self.done_action]
+
+        actions = []
+        for call in tool_calls:
+            action = tool_name_to_action.get(call.function.name)
+            if action is None:
+                print(f"[AGENT] {self.name} called unknown tool '{call.function.name}', ignoring it")
+                continue
+            # The model sometimes asks for the same agent twice; once is enough.
+            if action not in actions:
+                actions.append(action)
+
+        if not actions:
+            return [self.done_action]
+
+        # "Done" alongside real work means the model both delegated and tried to finish.
+        # The delegation wins; the parent gets another turn once the children report back.
+        if len(actions) > 1 and self.done_action in actions:
+            actions.remove(self.done_action)
+
+        if not PARALLEL_AGENT_CALLS:
+            return actions[:1]
+
+        return actions
+
+    def _request_tool_selection(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
+                                memories=None):
+        """
+        Runs the tool-calling request and returns (tool_calls, tool_name_to_action).
+        """
         tools, tool_name_to_action = self._build_tools(action_map)
 
         # The actions no longer have to be serialized into the prompt: they are the tools.
@@ -260,20 +329,9 @@ class Agent:
             tool_choice="required",
         )
 
-        tool_calls = getattr(message, "tool_calls", None)
-        if not tool_calls:
-            # tool_choice="required" should prevent this; treat it as "done" rather than
-            # falling through to a KeyError.
-            print(f"[AGENT] {self.name} returned no tool call, defaulting to 0 (done)")
-            return self.done_action
-
-        called = tool_calls[0].function.name
-        action = tool_name_to_action.get(called)
-        if action is None:
-            print(f"[AGENT] {self.name} called unknown tool '{called}', defaulting to 0 (done)")
-            return self.done_action
-
-        return action
+        # tool_choice="required" should always produce a call, but an empty list is
+        # handled by the callers rather than trusted.
+        return getattr(message, "tool_calls", None) or [], tool_name_to_action
 
     def _select_action_with_text(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
                                  memories=None):

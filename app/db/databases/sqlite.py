@@ -106,7 +106,8 @@ class SQLite(DatabaseInterface, ABC):
                 "depths" TEXT,
                 "is_top_level" INTEGER DEFAULT 0,
                 "top_level_task_max_depth" INTEGER,
-                "top_level_task_depth" INTEGER
+                "top_level_task_depth" INTEGER,
+                "pending_children" INTEGER DEFAULT 0
             )
         '''
 
@@ -128,6 +129,13 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute(sql_chat)
         cursor.execute(sql_task)
         cursor.execute(sql_connection_string)
+
+        # CREATE TABLE IF NOT EXISTS leaves an existing table alone, so columns added
+        # after a database was first created have to be applied separately.
+        existing = {row['name'] for row in cursor.execute("PRAGMA table_info(task)")}
+        if 'pending_children' not in existing:
+            print("[SQLite] Adding missing column task.pending_children")
+            cursor.execute("ALTER TABLE task ADD COLUMN pending_children INTEGER DEFAULT 0")
 
         self.conn.commit()
 
@@ -276,22 +284,25 @@ class SQLite(DatabaseInterface, ABC):
             "depths": self._deserialize_list(row['depths']),
             "is_top_level": bool(row['is_top_level']),
             "top_level_task_max_depth": row['top_level_task_max_depth'],
-            "top_level_task_depth": row['top_level_task_depth']
+            "top_level_task_depth": row['top_level_task_depth'],
+            "pending_children": row['pending_children'] or 0
         }
         return task_data
 
     @_synchronized
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
-                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None):
+                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
+                    pending_children=0):
         cursor = self.conn.cursor()
 
         cursor.execute(
-            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chat_id, json.dumps(agents), owner, coordinator_agent, current_agent, json.dumps(memories), parent_task_id,
              top_level_task_id, int(completed), created_at, json.dumps(depths), int(is_top_level),
              top_level_task_max_depth,
-             top_level_task_depth)
+             top_level_task_depth,
+             int(pending_children))
         )
 
         task_id = cursor.lastrowid
@@ -311,7 +322,8 @@ class SQLite(DatabaseInterface, ABC):
             "depths": depths,
             "is_top_level": is_top_level,
             "top_level_task_max_depth": top_level_task_max_depth,
-            "top_level_task_depth": top_level_task_depth
+            "top_level_task_depth": top_level_task_depth,
+            "pending_children": pending_children
         }
 
         print(f"CREATING TASK:")
@@ -396,7 +408,7 @@ class SQLite(DatabaseInterface, ABC):
         print(f"UPDATING TASK")
         print(json.dumps(task_data))
         cursor.execute(
-            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ? WHERE id = ?",
+            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ? WHERE id = ?",
             (
                 task_data['chat_id'],
                 json.dumps(task_data['agents']),
@@ -412,10 +424,38 @@ class SQLite(DatabaseInterface, ABC):
                 int(task_data.get('is_top_level', False)),
                 task_data.get('top_level_task_max_depth', None),
                 task_data.get('top_level_task_depth', None),
+                int(task_data.get('pending_children', 0) or 0),
                 task_data.get('task_id', None)
             ))
         self.conn.commit()
         return task_data
+
+    @_synchronized
+    def append_task_memories(self, task_id, memories) -> None:
+        if not memories:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT memories FROM task WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        if row is None:
+            raise Exception("Task not found")
+        current = self._deserialize_list(row['memories'])
+        current.extend(memories)
+        cursor.execute("UPDATE task SET memories = ? WHERE id = ?", (json.dumps(current), task_id))
+        self.conn.commit()
+
+    @_synchronized
+    def decrement_pending_children(self, task_id) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE task SET pending_children = MAX(COALESCE(pending_children, 0) - 1, 0) WHERE id = ?",
+            (task_id,))
+        cursor.execute("SELECT pending_children FROM task WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        self.conn.commit()
+        if row is None:
+            raise Exception("Task not found")
+        return int(row['pending_children'] or 0)
 
     @_synchronized
     def update_user(self, user: User) -> User:
