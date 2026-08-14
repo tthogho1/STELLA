@@ -1,5 +1,6 @@
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpxClient
 import os
+import ssl
 
 import threading
 from queue import Queue
@@ -8,17 +9,48 @@ import dotenv
 
 dotenv.load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def _build_client():
+    """
+    Builds the OpenAI client.
+
+    The server runs under gevent.monkey.patch_all(), and by default the SDK's HTTP layer
+    verifies TLS through `truststore`, whose SSLContext subclass recurses infinitely
+    against gevent's patched `ssl` module (RecursionError -> APIConnectionError on every
+    request). Handing the client an ordinary certifi-backed context keeps truststore out
+    of the path. Without monkey patching this is simply the normal verification path.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    try:
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+        return OpenAI(api_key=api_key, http_client=DefaultHttpxClient(verify=context))
+    except Exception as e:
+        print(f"[OPENAI] Could not build a certifi-backed HTTP client ({type(e).__name__}: {e}), "
+              f"falling back to SDK defaults")
+        return OpenAI(api_key=api_key)
+
+
+client = _build_client()
+
+# Default models. Overridable per agent, and through app/.env so that they can be updated
+# when OpenAI retires a model without having to touch the code.
+DEFAULT_ACTION_SELECTION_MODEL = os.getenv("OPENAI_MODEL_ACTION_SELECTION", "gpt-4o-mini")
+DEFAULT_RESPONSE_MODEL = os.getenv("OPENAI_MODEL_RESPONSE", "gpt-4o")
 
 
 class OpenAIQuery:
-    def __init__(self, messages, model, query_type="chat_completion"):
+    def __init__(self, messages, model, query_type="chat_completion", tools=None, tool_choice=None,
+                 response_format=None):
         self.done = threading.Event()
         self.exception = None
         self.result = None
         self.messages = messages
         self.model = model
         self.query_type = query_type
+        self.tools = tools
+        self.tool_choice = tool_choice
+        self.response_format = response_format
 
 
 class OpenAIClient:
@@ -49,7 +81,7 @@ class OpenAIClient:
     def _init_worker_threads(self):
         for _ in range(self.max_workers):
             worker = threading.Thread(target=self._worker)
-            worker.setDaemon(True)
+            worker.daemon = True
             worker.start()
 
     def _worker(self):
@@ -79,8 +111,25 @@ class OpenAIClient:
 
                 print(f"[OPENAI Query]\nModel: {query.model}\n{query.messages}")
 
+                # response_format is only sent when asked for, so models that predate it
+                # keep working unchanged.
+                extra = {}
+                if query.response_format is not None:
+                    extra["response_format"] = query.response_format
+
                 response = client.chat.completions.create(model=query.model,
-                                                          messages=query.messages)
+                                                          messages=query.messages,
+                                                          **extra)
+                query.result = response
+                query.done.set()
+            elif query.query_type == "tool_call":
+
+                print(f"[OPENAI Tool Query]\nModel: {query.model}\n{query.messages}")
+
+                response = client.chat.completions.create(model=query.model,
+                                                          messages=query.messages,
+                                                          tools=query.tools,
+                                                          tool_choice=query.tool_choice or "auto")
                 query.result = response
                 query.done.set()
             else:
@@ -89,10 +138,13 @@ class OpenAIClient:
             query.exception = e
             query.done.set()
 
-    def chat_completion(self, messages, model):
-        # Create query
-        query = OpenAIQuery(messages, model, query_type="chat_completion")
-
+    def _run(self, query: OpenAIQuery):
+        """
+        Puts a query on the queue, blocks until a worker has resolved it and returns the
+        raw API response. Raises whatever the worker caught.
+        :param query: The query to run
+        :return: The raw OpenAI response object
+        """
         # Add query to queue
         self.query_queue.put(query)
 
@@ -100,11 +152,42 @@ class OpenAIClient:
         query.done.wait()
 
         # Remove query from current queries
-        self.current_queries.remove(query)
+        self.current_queries.discard(query)
 
         # Check if there was an exception
         if query.exception:
             raise query.exception
 
+        return query.result
+
+    def chat_completion(self, messages, model, response_format=None):
+        """
+        :param messages: Messages to send
+        :param model: Model to use
+        :param response_format: Optional OpenAI response_format, e.g. {"type": "json_object"}
+                                or a json_schema block, to constrain the reply
+        :return: The message content
+        """
+        response = self._run(OpenAIQuery(messages, model, query_type="chat_completion",
+                                         response_format=response_format))
+
         # Return result
-        return query.result.choices[0].message.content
+        return response.choices[0].message.content
+
+    def tool_call(self, messages, model, tools, tool_choice="required"):
+        """
+        Same as chat_completion, but exposes a set of tools to the model and returns the
+        message it produced so the caller can read message.tool_calls.
+
+        Unlike asking the model to answer with a bare index, the API constrains the reply
+        to one of the supplied tool names, so there is nothing to parse out of free text.
+        :param messages: Messages to send
+        :param model: Model to use
+        :param tools: Tool definitions in OpenAI's function-tool format
+        :param tool_choice: "required" forces the model to pick one of the tools
+        :return: The assistant message (has .tool_calls and .content)
+        """
+        response = self._run(OpenAIQuery(messages, model, query_type="tool_call",
+                                         tools=tools, tool_choice=tool_choice))
+
+        return response.choices[0].message
