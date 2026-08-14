@@ -26,8 +26,11 @@ class DemoBreweryAgent(Agent):
         if not city:
             return "Error in OpenStreetMap API request – Tell the user that something went wrong and stop the conversation"
 
-        # Step 2: Get the weather using Open-Meteo
-        brewery_url = f"https://api.openbrewerydb.org/v1/breweries?by_city={city}&per_page=200"
+        # Step 2: Look the city up in Open Brewery DB. The whole reply ends up in the
+        # task's memories and is re-sent on every later agent call, so ask for a handful
+        # of breweries rather than 200 -- a full page for a big city is ~46 kB (~11k
+        # tokens) and a couple of rounds of that overflows the model's context window.
+        brewery_url = f"https://api.openbrewerydb.org/v1/breweries?by_city={city}&per_page=10"
         brewery_response = requests.get(brewery_url)
         if brewery_response.status_code != 200:
             return "Error in Open-Meteo API request – Tell the user that something went wrong and stop the conversation"
