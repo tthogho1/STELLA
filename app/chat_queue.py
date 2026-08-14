@@ -1,6 +1,7 @@
 
 import queue
 import threading
+import traceback
 
 from app.db import db
 from app.models.chat import Chat
@@ -33,25 +34,52 @@ class Worker(threading.Thread):
             print(f"[ChatQueue] -- Worker {self.name} picked up chat {chat_id}")
             self.manager.active_chats.append(chat_id)
 
+            try:
+                chat = db.get_chat_by_id(chat_id)
+
+                if chat.busy:
+                    self.socketio.emit(
+                        'chat_information',
+                        #json.dumps({"type": "busy", "message": "This chat is processing your previous request, please wait."}),
+                        room=chat_id,
+                        namespace='/chat'
+                    )
+
+                chat.busy = True
+                db.update_chat(chat)
+
+                task = Task.create_top_level_task(chat)
+                self.task_manager.add_task(task.task_id)
+            except Exception as e:
+                # Same reasoning as in TaskManager's worker: an escaping exception would
+                # kill this thread and leave the chat permanently marked as busy.
+                print(f"[ChatQueue] !! Worker {self.name} failed chat {chat_id}: {e}")
+                traceback.print_exc()
+                self._release_chat(chat_id)
+            finally:
+                self.chat_queue.task_done()
+                print(f"[ChatQueue] ---- Worker {self.name} finished chat {chat_id}")
+                if chat_id in self.manager.active_chats:
+                    self.manager.active_chats.remove(chat_id)
+
+    def _release_chat(self, chat_id):
+        """
+        Clears the busy flag so the user can send another message, and tells them that the
+        request could not be started.
+        :param chat_id: The id of the chat that failed
+        """
+        try:
             chat = db.get_chat_by_id(chat_id)
-
-            if chat.busy:
-                self.socketio.emit(
-                    'chat_information',
-                    #json.dumps({"type": "busy", "message": "This chat is processing your previous request, please wait."}),
-                    room=chat_id,
-                    namespace='/chat'
-                )
-
-            chat.busy = True
+            chat.busy = False
             db.update_chat(chat)
-
-            task = Task.create_top_level_task(chat)
-            self.task_manager.add_task(task.task_id)
-
-            self.chat_queue.task_done()
-            print(f"[ChatQueue] ---- Worker {self.name} finished chat {chat_id}")
-            self.manager.active_chats.remove(chat_id)
+            self.socketio.emit(
+                'message',
+                "Sorry, something went wrong while starting your request. Please try again.",
+                room=chat_id,
+                namespace='/chat'
+            )
+        except Exception as e:
+            print(f"[ChatQueue] !! Could not release the chat {chat_id}: {e}")
 
 
 class ChatQueue:

@@ -248,3 +248,6 @@ fabric.properties
 
 
 stella
+
+# Local coding-assistant guidance, kept out of the repository
+CLAUDE.md

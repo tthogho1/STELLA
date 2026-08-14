@@ -237,6 +237,13 @@ class Task:
                 chat=chat if current_agent.wants_chat else None,
                 memories=self.memories if current_agent.wants_memories else None,
             ))
+
+            # Agents are free to override select_action, so never trust the result blindly.
+            # An unknown key here would raise a KeyError below and take the worker down.
+            if selected_action != "0" and selected_action not in action_map:
+                print(f"[TASK] -- {current_agent.name} returned invalid action "
+                      f"'{selected_action}', treating it as 0 (done)")
+                selected_action = "0"
         print(f"[TASK] -- {current_agent.name} Selected action: {selected_action}")
 
         # 3.1 If action selection returns another Agent
