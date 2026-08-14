@@ -20,6 +20,24 @@ USE_TOOL_CALLING = os.getenv('USE_TOOL_CALLING', 'true').strip().lower() not in 
 PARALLEL_AGENT_CALLS = os.getenv('PARALLEL_AGENT_CALLS', 'true').strip().lower() not in ('false', '0', 'no')
 
 
+def _int_env(name, default):
+    """Reads a non-negative int from the environment; 0 disables the limit."""
+    try:
+        value = int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        print(f"[AGENT] {name} is not a number, falling back to {default}")
+        return int(default)
+    return max(value, 0)
+
+
+# Caps on what goes into a prompt. Memories accumulate across a task tree and the whole
+# set is re-sent on every agent call, so without a ceiling one large payload is enough to
+# overflow the model's context window. 0 means "no limit".
+MAX_MEMORY_ENTRIES = _int_env('MAX_MEMORY_ENTRIES', 20)
+MAX_MEMORY_ENTRY_CHARS = _int_env('MAX_MEMORY_ENTRY_CHARS', 8000)
+MAX_CHAT_HISTORY_MESSAGES = _int_env('MAX_CHAT_HISTORY_MESSAGES', 20)
+
+
 class Agent:
     """
     Loads and stores information about an agent
@@ -109,16 +127,34 @@ class Agent:
     def _construct_memory_string(memories):
         if not memories:
             return ""
+
+        dropped = 0
+        if MAX_MEMORY_ENTRIES and len(memories) > MAX_MEMORY_ENTRIES:
+            # Keep the newest entries: they are the results this agent still has to act on.
+            dropped = len(memories) - MAX_MEMORY_ENTRIES
+            memories = memories[-MAX_MEMORY_ENTRIES:]
+            print(f"[AGENT] Dropping {dropped} oldest memory entrie(s), keeping {MAX_MEMORY_ENTRIES}")
+
         memory_string = "=== AVAILABLE INFORMATION ===\n"
+        if dropped:
+            memory_string += f"({dropped} older entrie(s) omitted)\n"
         for memory in memories:
-            memory_string += f"{memory}"
+            entry = str(memory)
+            if MAX_MEMORY_ENTRY_CHARS and len(entry) > MAX_MEMORY_ENTRY_CHARS:
+                # A single agent can return a very large payload; one of those is enough
+                # to overflow the context window once it is re-sent a few times.
+                entry = entry[:MAX_MEMORY_ENTRY_CHARS] + f"... (truncated, {len(entry)} chars total)"
+            memory_string += entry
         memory_string += "\n"
         return memory_string
 
     @staticmethod
     def _construct_chat_string(chat: Chat):
+        history = chat.get_chat_history(MAX_CHAT_HISTORY_MESSAGES) if MAX_CHAT_HISTORY_MESSAGES \
+            else chat.chat_history
+
         chat_string = "=== CHAT WITH THE USER ===\n"
-        for message in chat.chat_history:
+        for message in history:
             role = message['role']
             message = message['content']
             chat_string += f"{role}: {message}\n"
@@ -308,8 +344,11 @@ class Agent:
         tools, tool_name_to_action = self._build_tools(action_map)
 
         # The actions no longer have to be serialized into the prompt: they are the tools.
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}"
+        # Chat first, memories second: the chat is fixed for the whole request while the
+        # memories grow with every round, and prompt caching only pays off when the stable
+        # part is a prefix of the volatile part.
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}"
 
         messages = [
             {
@@ -337,8 +376,8 @@ class Agent:
                                  memories=None):
         system_message = self.system_action_selection_instructions
 
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}" \
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}" \
                        f"{self._construct_available_actions_string(action_map)}" \
                        f"{self.system_action_selection_instructions}"
 
@@ -364,8 +403,8 @@ class Agent:
     def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder, chat: Chat = None, memories=None):
         system_message = self.system_response_instructions
 
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}" \
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}" \
                        f"{self.system_response_instructions}"
 
         messages = [

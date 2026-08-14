@@ -16,7 +16,7 @@ class Task:
     def __init__(self, task_id, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                  parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                  is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
-                 pending_children=0):
+                 pending_children=0, inherited_memory_count=0):
         """
         Creates a new task in the database.
         :param task_id: The id of the task
@@ -54,6 +54,9 @@ class Task:
         self.top_level_task_depth = top_level_task_depth if top_level_task_depth is not None else 0
         # Children spawned in the current turn that have not reported back yet.
         self.pending_children = pending_children or 0
+        # How many of self.memories were inherited from the parent at creation time.
+        # Only the entries after this point were produced by this task.
+        self.inherited_memory_count = inherited_memory_count or 0
 
     @classmethod
     def create_top_level_task(cls, chat: Chat):
@@ -117,6 +120,7 @@ class Task:
             top_level_task_max_depth=task_data.get('top_level_task_max_depth', None),
             top_level_task_depth=task_data.get('top_level_task_depth', None),
             pending_children=task_data.get('pending_children', 0),
+            inherited_memory_count=task_data.get('inherited_memory_count', 0),
         )
 
     @classmethod
@@ -139,6 +143,7 @@ class Task:
             top_level_task_max_depth=task_data.get('top_level_task_max_depth', None),
             top_level_task_depth=task_data.get('top_level_task_depth', None),
             pending_children=task_data.get('pending_children', 0),
+            inherited_memory_count=task_data.get('inherited_memory_count', 0),
         )
 
     def check_max_depth_reached(self, selected_agent, top_level_task):
@@ -318,6 +323,10 @@ class Task:
                     top_level_task_id=self.top_level_task_id,
                     completed=False,
                     is_top_level=False,
+                    # The child starts out holding the parent's memories as context. Record
+                    # how many, so that on completion it forwards only what it produced
+                    # itself instead of handing the parent its own entries back.
+                    inherited_memory_count=len(self.memories),
                 )
                 child_task_ids.append(new_task_data['task_id'])
 
@@ -360,15 +369,22 @@ class Task:
         # Siblings running in parallel forward to the same parent, so the append has to
         # happen inside the database rather than as load -> extend -> save here.
         if self.parent_task_id is not None:
+            # Only the entries this task produced. The ones it inherited are already in
+            # the parent, and sending them back doubles the parent's memories on every
+            # round, which grows the prompt exponentially until it overflows the model's
+            # context window.
+            own_memories = self.memories[self.inherited_memory_count:]
+
             if current_agent.forward_all_memory_entries_to_parent:  # If all
-                print(f"[TASK] -- Forwarding all memories to parent task {self.parent_task_id}")
-                print(f"[TASK] -- Memories: {self.memories}")
-                db.append_task_memories(self.parent_task_id, self.memories)
+                print(f"[TASK] -- Forwarding {len(own_memories)} own memory entrie(s) to "
+                      f"parent task {self.parent_task_id} "
+                      f"(holding {len(self.memories)}, {self.inherited_memory_count} inherited)")
+                db.append_task_memories(self.parent_task_id, own_memories)
             elif current_agent.forward_last_memory_to_parent:  # If last
-                if self.memories:
+                if own_memories:
                     print(f"[TASK] -- Forwarding last memory to parent task {self.parent_task_id}")
-                    print(f"[TASK] -- Last memory: {self.memories[-1]}")
-                    db.append_task_memories(self.parent_task_id, [self.memories[-1]])
+                    print(f"[TASK] -- Last memory: {own_memories[-1]}")
+                    db.append_task_memories(self.parent_task_id, [own_memories[-1]])
 
         if current_agent.on_completion is not None:
             print(f"[TASK] -- Agent {self.current_agent} has on_completion function, calling it")
@@ -413,4 +429,5 @@ class Task:
             "top_level_task_max_depth": self.top_level_task_max_depth,
             "top_level_task_depth": self.top_level_task_depth,
             "pending_children": self.pending_children,
+            "inherited_memory_count": self.inherited_memory_count,
         }

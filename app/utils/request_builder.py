@@ -100,10 +100,13 @@ class RequestBuilder:
 
         user_message = f"API Endpoint:\n===\n{details}"
         user_message += "\n===\n\nUnstructured information:\n---\n"
-        if memories:
-            user_message += self._construct_memory_string(memories)
+        # Chat before memories: the chat is fixed for the whole request while memories
+        # grow with every round, so this keeps the stable content at the front where
+        # prompt caching can reuse it.
         if chat:
             user_message += self._construct_chat_string(chat)
+        if memories:
+            user_message += self._construct_memory_string(memories)
 
         if instructions:
             user_message += "---\n\nAdditional instructions:\n"

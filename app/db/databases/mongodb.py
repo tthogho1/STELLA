@@ -227,7 +227,8 @@ class MongoDB(DatabaseInterface, ABC):
             "is_top_level": task.get('is_top_level', False),
             "top_level_task_max_depth": task.get('top_level_task_max_depth', None),
             "top_level_task_depth": task.get('top_level_task_depth', None),
-            "pending_children": task.get('pending_children', 0) or 0
+            "pending_children": task.get('pending_children', 0) or 0,
+            "inherited_memory_count": task.get('inherited_memory_count', 0) or 0
         }
 
         return task_data
@@ -235,7 +236,7 @@ class MongoDB(DatabaseInterface, ABC):
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
-                    pending_children=0):
+                    pending_children=0, inherited_memory_count=0):
         """
         Creates a new task in the database.
         :param chat_id: The id of the original chat where the message was sent by the user to Stella
@@ -270,7 +271,8 @@ class MongoDB(DatabaseInterface, ABC):
             "is_top_level": is_top_level,
             "top_level_task_max_depth": top_level_task_max_depth,
             "top_level_task_depth": top_level_task_depth,
-            "pending_children": pending_children
+            "pending_children": pending_children,
+            "inherited_memory_count": inherited_memory_count
         }
         task_id = str(self.db.tasks.insert_one(task_data).inserted_id)
         task_data['task_id'] = str(task_id)

@@ -105,7 +105,7 @@ class DatabaseInterface(ABC):
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
-                    pending_children=0):
+                    pending_children=0, inherited_memory_count=0):
         pass
 
     @abstractmethod
