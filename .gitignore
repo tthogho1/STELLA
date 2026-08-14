@@ -1,6 +1,9 @@
 app/.env
 app/.env.backup
 app/sqlite.db
+# WAL sidecar files, created alongside the database in journal_mode=WAL
+app/sqlite.db-wal
+app/sqlite.db-shm
 cli/session.json
 **/__pycache__/
 *.egg-info/
