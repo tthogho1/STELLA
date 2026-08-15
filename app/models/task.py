@@ -211,6 +211,36 @@ class Task:
         self.pending_results = {}
         db.update_task_data(self.to_dict())
 
+    def forward_memories_to_parent(self, current_agent):
+        """
+        Hands this task's results up into its slot on the parent, per the agent's flags.
+
+        Two things are deliberate here. Only the entries this task produced are sent: the
+        inherited ones are already in the parent, and returning them doubles the parent's
+        memories on every round, which grew the prompt exponentially until it overflowed
+        the context window. And they go into the slot matching the delegation order rather
+        than straight onto the parent's memories, so results do not end up arranged by
+        whichever sibling happened to finish first.
+        :param current_agent: The agent that just finished, whose forwarding flags apply
+        """
+        if self.parent_task_id is None:
+            return
+
+        own_memories = self.memories[self.inherited_memory_count:]
+        slot = self.child_index if self.child_index is not None else 0
+
+        if current_agent.forward_all_memory_entries_to_parent:  # If all
+            print(f"[TASK] -- Forwarding {len(own_memories)} own memory entrie(s) into "
+                  f"slot {slot} of parent task {self.parent_task_id} "
+                  f"(holding {len(self.memories)}, {self.inherited_memory_count} inherited)")
+            db.store_child_result(self.parent_task_id, slot, own_memories)
+        elif current_agent.forward_last_memory_to_parent:  # If last
+            if own_memories:
+                print(f"[TASK] -- Forwarding last memory into slot {slot} of parent task "
+                      f"{self.parent_task_id}")
+                print(f"[TASK] -- Last memory: {own_memories[-1]}")
+                db.store_child_result(self.parent_task_id, slot, [own_memories[-1]])
+
     def _emit_progress(self, socketio, message):
         """
         Sends a progress line on the chat_information event.
@@ -441,31 +471,8 @@ class Task:
             self._emit_progress(socketio, f"{current_agent.name} done")
 
         # 3.2.3 If task is a subtask, tell parent task
-        # 3.2.3.1 Pass memories to parent task if necessary.
-        # Siblings running in parallel forward to the same parent, so the append has to
-        # happen inside the database rather than as load -> extend -> save here.
-        if self.parent_task_id is not None:
-            # Only the entries this task produced. The ones it inherited are already in
-            # the parent, and sending them back doubles the parent's memories on every
-            # round, which grows the prompt exponentially until it overflows the model's
-            # context window.
-            own_memories = self.memories[self.inherited_memory_count:]
-
-            # Results go into this child's slot rather than straight onto the parent's
-            # memories, so the parent can read them back in delegation order.
-            slot = self.child_index if self.child_index is not None else 0
-
-            if current_agent.forward_all_memory_entries_to_parent:  # If all
-                print(f"[TASK] -- Forwarding {len(own_memories)} own memory entrie(s) into "
-                      f"slot {slot} of parent task {self.parent_task_id} "
-                      f"(holding {len(self.memories)}, {self.inherited_memory_count} inherited)")
-                db.store_child_result(self.parent_task_id, slot, own_memories)
-            elif current_agent.forward_last_memory_to_parent:  # If last
-                if own_memories:
-                    print(f"[TASK] -- Forwarding last memory into slot {slot} of parent task "
-                          f"{self.parent_task_id}")
-                    print(f"[TASK] -- Last memory: {own_memories[-1]}")
-                    db.store_child_result(self.parent_task_id, slot, [own_memories[-1]])
+        # 3.2.3.1 Pass memories to parent task if necessary
+        self.forward_memories_to_parent(current_agent)
 
         if current_agent.on_completion is not None:
             print(f"[TASK] -- Agent {self.current_agent} has on_completion function, calling it")

@@ -47,12 +47,63 @@ class Worker(threading.Thread):
                 # shrinking the worker pool and leaving the chat stuck on busy=True.
                 print(f"[TaskQueue] !! Worker {self.name} failed task {task_id}: {e}")
                 traceback.print_exc()
-                self._release_chat(task_id)
+                self._handle_failure(task_id)
             finally:
                 self.task_queue.task_done()
                 print(f"[TaskQueue] ---- Worker {self.name} finished task {task_id}")
                 if task_id in self.manager.active_tasks:
                     self.manager.active_tasks.remove(task_id)
+
+    def _handle_failure(self, task_id):
+        """
+        Reports a failed task upwards instead of dropping it.
+
+        A subtask that dies still owes its parent an answer: the parent is waiting on a
+        fixed number of children, and a child that disappears without decrementing that
+        counter leaves the parent parked forever. Worse, when one of two siblings fails
+        the other one's result would be thrown away with it. Release the slot and let the
+        parent run again with whatever did come back; only a failing top level task ends
+        the request.
+        :param task_id: The id of the task that failed
+        """
+        try:
+            task_data = db.get_task_data(task_id)
+        except Exception as e:
+            # Nothing to report to; all that is left is to unblock the user.
+            print(f"[TaskQueue] !! Could not load failed task {task_id}: {e}")
+            self._release_chat(task_id)
+            return
+
+        parent_task_id = task_data.get('parent_task_id')
+        if parent_task_id is None:
+            self._release_chat(task_id)
+            return
+
+        agent = task_data.get('current_agent') or 'An agent'
+        try:
+            self.manager.socketio.emit(
+                'chat_information',
+                json.dumps({"type": "progress", "chat_id": task_data.get('chat_id'),
+                            "message": f"{agent} failed, continuing without it"}),
+                room=task_data.get('chat_id'),
+                namespace='/chat'
+            )
+        except Exception as e:
+            print(f"[TaskQueue] !! Could not report the failure of task {task_id}: {e}")
+
+        try:
+            remaining = db.decrement_pending_children(parent_task_id)
+        except Exception as e:
+            print(f"[TaskQueue] !! Could not release the join on parent {parent_task_id}: {e}")
+            self._release_chat(task_id)
+            return
+
+        if remaining > 0:
+            print(f"[TaskQueue] -- Parent {parent_task_id} still waiting on {remaining} sibling(s)")
+            return
+
+        print(f"[TaskQueue] -- Last sibling failed, re-queuing parent task {parent_task_id}")
+        self.manager.add_task(parent_task_id)
 
     def _release_chat(self, task_id):
         """
