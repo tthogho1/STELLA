@@ -14,6 +14,29 @@ load_dotenv()
 # tool support); select_action also falls back on its own if a tool call raises.
 USE_TOOL_CALLING = os.getenv('USE_TOOL_CALLING', 'true').strip().lower() not in ('false', '0', 'no')
 
+# When the model asks for several agents in one turn, run them as siblings instead of
+# keeping only the first. Requires tool calling. Set PARALLEL_AGENT_CALLS="false" to keep
+# the one-agent-at-a-time behaviour.
+PARALLEL_AGENT_CALLS = os.getenv('PARALLEL_AGENT_CALLS', 'true').strip().lower() not in ('false', '0', 'no')
+
+
+def _int_env(name, default):
+    """Reads a non-negative int from the environment; 0 disables the limit."""
+    try:
+        value = int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        print(f"[AGENT] {name} is not a number, falling back to {default}")
+        return int(default)
+    return max(value, 0)
+
+
+# Caps on what goes into a prompt. Memories accumulate across a task tree and the whole
+# set is re-sent on every agent call, so without a ceiling one large payload is enough to
+# overflow the model's context window. 0 means "no limit".
+MAX_MEMORY_ENTRIES = _int_env('MAX_MEMORY_ENTRIES', 20)
+MAX_MEMORY_ENTRY_CHARS = _int_env('MAX_MEMORY_ENTRY_CHARS', 8000)
+MAX_CHAT_HISTORY_MESSAGES = _int_env('MAX_CHAT_HISTORY_MESSAGES', 20)
+
 
 class Agent:
     """
@@ -29,13 +52,18 @@ class Agent:
                                                    "actions. If there is enough information to " \
                                                    "answer the user's request, or if no available actions are" \
                                                    " relevant to help solve the user's request, respond with '0'. "
-    default_tool_action_selection_instructions = "\n\n==== INSTRUCTIONS ====\n" \
-                                                 "Carefully examine the chat history. Focus on the user's latest " \
-                                                 "request and call the single tool that is most relevant to " \
-                                                 "solving it.\n\nCarefully analyze the provided details from your " \
-                                                 "previous actions. If there is already enough information to " \
-                                                 "answer the user's request, or if none of the other tools are " \
-                                                 "relevant, call the tool that responds to the user."
+    default_tool_action_selection_instructions = \
+        "\n\n==== INSTRUCTIONS ====\n" \
+        "Carefully examine the chat history and focus on the user's latest request.\n\n" \
+        "First read AVAILABLE INFORMATION. It holds the results of the actions already " \
+        "taken for this request. Anything answered there is done: never call a tool to " \
+        "fetch information you have already been given.\n\n" \
+        "If AVAILABLE INFORMATION already covers the whole request, or none of the tools " \
+        "are relevant to it, respond to the user instead of calling anything else.\n\n" \
+        "Otherwise call one tool for each part of the request that is still unanswered. " \
+        "Independent parts are handled at the same time, so call them together in this " \
+        "one turn rather than one at a time. Call each tool at most once, and do not " \
+        "combine responding to the user with any other tool."
     default_system_response_instructions = "\n\n==== INSTRUCTIONS ====\n" \
                                            "Generate an appropriate response to the user's request using the " \
                                            "provided details. Focus on the user's latest message, and use the " \
@@ -99,16 +127,34 @@ class Agent:
     def _construct_memory_string(memories):
         if not memories:
             return ""
+
+        dropped = 0
+        if MAX_MEMORY_ENTRIES and len(memories) > MAX_MEMORY_ENTRIES:
+            # Keep the newest entries: they are the results this agent still has to act on.
+            dropped = len(memories) - MAX_MEMORY_ENTRIES
+            memories = memories[-MAX_MEMORY_ENTRIES:]
+            print(f"[AGENT] Dropping {dropped} oldest memory entrie(s), keeping {MAX_MEMORY_ENTRIES}")
+
         memory_string = "=== AVAILABLE INFORMATION ===\n"
+        if dropped:
+            memory_string += f"({dropped} older entrie(s) omitted)\n"
         for memory in memories:
-            memory_string += f"{memory}"
+            entry = str(memory)
+            if MAX_MEMORY_ENTRY_CHARS and len(entry) > MAX_MEMORY_ENTRY_CHARS:
+                # A single agent can return a very large payload; one of those is enough
+                # to overflow the context window once it is re-sent a few times.
+                entry = entry[:MAX_MEMORY_ENTRY_CHARS] + f"... (truncated, {len(entry)} chars total)"
+            memory_string += entry
         memory_string += "\n"
         return memory_string
 
     @staticmethod
     def _construct_chat_string(chat: Chat):
+        history = chat.get_chat_history(MAX_CHAT_HISTORY_MESSAGES) if MAX_CHAT_HISTORY_MESSAGES \
+            else chat.chat_history
+
         chat_string = "=== CHAT WITH THE USER ===\n"
-        for message in chat.chat_history:
+        for message in history:
             role = message['role']
             message = message['content']
             chat_string += f"{role}: {message}\n"
@@ -227,20 +273,82 @@ class Agent:
         """
         if USE_TOOL_CALLING:
             try:
-                return self._select_action_with_tools(openai_client, action_map, chat, memories)
+                return self._select_actions_with_tools(openai_client, action_map, chat, memories)[0]
             except Exception as e:
                 print(f"[AGENT] Tool-based action selection failed ({type(e).__name__}: {e}), "
                       f"falling back to text-based selection")
 
         return self._select_action_with_text(openai_client, action_map, chat, memories)
 
-    def _select_action_with_tools(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
-                                  memories=None):
+    def select_actions(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None, memories=None):
+        """
+        Like select_action, but may return several actions to run as siblings.
+
+        The model can ask for more than one agent in a single turn, and the task tree can
+        carry them as parallel children. Subclasses that implement their own select_action
+        keep full control: their single choice is honoured as-is.
+        :return: A list of action keys. ["0"] means done. Never empty.
+        """
+        # An agent with hand-written selection logic decides on its own.
+        if type(self).select_action is not Agent.select_action:
+            return [str(self.select_action(openai_client, action_map, chat, memories))]
+
+        if USE_TOOL_CALLING:
+            try:
+                actions = self._select_actions_with_tools(openai_client, action_map, chat, memories)
+                if actions:
+                    return actions
+            except Exception as e:
+                print(f"[AGENT] Tool-based action selection failed ({type(e).__name__}: {e}), "
+                      f"falling back to text-based selection")
+
+        return [self._select_action_with_text(openai_client, action_map, chat, memories)]
+
+    def _select_actions_with_tools(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
+                                   memories=None):
+        tool_calls, tool_name_to_action = self._request_tool_selection(
+            openai_client, action_map, chat, memories)
+
+        if not tool_calls:
+            print(f"[AGENT] {self.name} returned no tool call, defaulting to 0 (done)")
+            return [self.done_action]
+
+        actions = []
+        for call in tool_calls:
+            action = tool_name_to_action.get(call.function.name)
+            if action is None:
+                print(f"[AGENT] {self.name} called unknown tool '{call.function.name}', ignoring it")
+                continue
+            # The model sometimes asks for the same agent twice; once is enough.
+            if action not in actions:
+                actions.append(action)
+
+        if not actions:
+            return [self.done_action]
+
+        # "Done" alongside real work means the model both delegated and tried to finish.
+        # The delegation wins; the parent gets another turn once the children report back.
+        if len(actions) > 1 and self.done_action in actions:
+            actions.remove(self.done_action)
+
+        if not PARALLEL_AGENT_CALLS:
+            return actions[:1]
+
+        return actions
+
+    def _request_tool_selection(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
+                                memories=None):
+        """
+        Runs the tool-calling request and returns (tool_calls, tool_name_to_action).
+        """
         tools, tool_name_to_action = self._build_tools(action_map)
 
         # The actions no longer have to be serialized into the prompt: they are the tools.
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}"
+        # Chat first, memories second: the chat is fixed for the whole request while the
+        # memories grow with every round, and prompt caching only pays off when the stable
+        # part is a prefix of the volatile part.
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}"
 
         messages = [
             {
@@ -260,27 +368,16 @@ class Agent:
             tool_choice="required",
         )
 
-        tool_calls = getattr(message, "tool_calls", None)
-        if not tool_calls:
-            # tool_choice="required" should prevent this; treat it as "done" rather than
-            # falling through to a KeyError.
-            print(f"[AGENT] {self.name} returned no tool call, defaulting to 0 (done)")
-            return self.done_action
-
-        called = tool_calls[0].function.name
-        action = tool_name_to_action.get(called)
-        if action is None:
-            print(f"[AGENT] {self.name} called unknown tool '{called}', defaulting to 0 (done)")
-            return self.done_action
-
-        return action
+        # tool_choice="required" should always produce a call, but an empty list is
+        # handled by the callers rather than trusted.
+        return getattr(message, "tool_calls", None) or [], tool_name_to_action
 
     def _select_action_with_text(self, openai_client: OpenAIClient, action_map: dict, chat: Chat = None,
                                  memories=None):
         system_message = self.system_action_selection_instructions
 
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}" \
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}" \
                        f"{self._construct_available_actions_string(action_map)}" \
                        f"{self.system_action_selection_instructions}"
 
@@ -306,8 +403,8 @@ class Agent:
     def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder, chat: Chat = None, memories=None):
         system_message = self.system_response_instructions
 
-        user_message = f"{self._construct_memory_string(memories) if memories else ''}" \
-                       f"{self._construct_chat_string(chat) if chat else ''}" \
+        user_message = f"{self._construct_chat_string(chat) if chat else ''}" \
+                       f"{self._construct_memory_string(memories) if memories else ''}" \
                        f"{self.system_response_instructions}"
 
         messages = [

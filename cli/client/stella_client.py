@@ -72,7 +72,7 @@ class StellaClient:
         self.sio = socketio.Client()
         self.sio.on('connect', self.on_connect, namespace=self.socketio_namespace)
         self.sio.on('message', self.on_message, namespace=self.socketio_namespace)
-        self.sio.on('chat_information', self.on_message, namespace=self.socketio_namespace)
+        self.sio.on('chat_information', self.on_chat_information, namespace=self.socketio_namespace)
         self.sio.on('disconnect', self.on_disconnect, namespace=self.socketio_namespace)
 
         self.should_wait_for_response = True
@@ -351,6 +351,32 @@ class StellaClient:
         # If the message is a chat message, print it
         print_with_delay(message)
         self.waiting_for_response = False
+
+    def on_chat_information(self, message):
+        """
+        Handles progress updates from the server.
+
+        Only the final answer arrives on the 'message' event, so without these the client
+        sits silent for the whole agent tree. They must not go through on_message: that
+        clears waiting_for_response, which would let the user type again while the
+        request is still running.
+        """
+        try:
+            data = json.loads(message) if isinstance(message, str) else message
+        except (TypeError, ValueError):
+            data = message
+        text = data.get("message") if isinstance(data, dict) else data
+        if not text:
+            return
+        # Anything may arrive on the wire; print_info concatenates, so coerce first.
+        text = text if isinstance(text, str) else str(text)
+
+        # The spinner owns the current line, so pause it before writing.
+        was_waiting = self.waiting_for_response
+        self.spinner.stop()
+        print_info(text)
+        if was_waiting:
+            self.spinner.start()
 
     def get_connection_string(self, chat_id):
         response = requests.get(self.compose_url(f"chat/authorize?chat_id={chat_id}"), headers=self.auth_headers())

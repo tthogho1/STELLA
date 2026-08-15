@@ -2,6 +2,7 @@ import os
 from abc import ABC
 
 from bson import ObjectId
+from pymongo import ReturnDocument
 
 import dotenv
 
@@ -225,14 +226,20 @@ class MongoDB(DatabaseInterface, ABC):
             "depths": task.get('depths', None),
             "is_top_level": task.get('is_top_level', False),
             "top_level_task_max_depth": task.get('top_level_task_max_depth', None),
-            "top_level_task_depth": task.get('top_level_task_depth', None)
+            "top_level_task_depth": task.get('top_level_task_depth', None),
+            "pending_children": task.get('pending_children', 0) or 0,
+            "inherited_memory_count": task.get('inherited_memory_count', 0) or 0,
+            "child_index": task.get('child_index', None),
+            "pending_results": task.get('pending_results', {}) or {}
         }
 
         return task_data
 
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
-                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None):
+                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
+                    pending_children=0, inherited_memory_count=0, child_index=None,
+                    pending_results=None):
         """
         Creates a new task in the database.
         :param chat_id: The id of the original chat where the message was sent by the user to Stella
@@ -266,7 +273,11 @@ class MongoDB(DatabaseInterface, ABC):
             "depths": depths,
             "is_top_level": is_top_level,
             "top_level_task_max_depth": top_level_task_max_depth,
-            "top_level_task_depth": top_level_task_depth
+            "top_level_task_depth": top_level_task_depth,
+            "pending_children": pending_children,
+            "inherited_memory_count": inherited_memory_count,
+            "child_index": child_index,
+            "pending_results": pending_results or {}
         }
         task_id = str(self.db.tasks.insert_one(task_data).inserted_id)
         task_data['task_id'] = str(task_id)
@@ -446,6 +457,44 @@ class MongoDB(DatabaseInterface, ABC):
         """
         self.db.tasks.update_one({"_id": ObjectId(task_data['task_id'])}, {"$set": task_data})
         return task_data
+
+    def store_child_result(self, task_id, child_index, memories) -> None:
+        """
+        Records one child's results in its own slot on the parent.
+
+        $set on a single nested field is atomic, so siblings writing different slots at
+        the same time cannot lose each other's results.
+        :param task_id: The parent task
+        :param child_index: Position of the child in the parent's delegation order
+        :param memories: The memory strings this child produced
+        """
+        result = self.db.tasks.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": {f"pending_results.{child_index}": list(memories)}}
+        )
+        if result.matched_count == 0:
+            raise Exception("Task not found")
+
+    def decrement_pending_children(self, task_id) -> int:
+        """
+        Atomically decrements the outstanding-children counter and returns the new value.
+        :param task_id: The parent task
+        :return: The counter value after the decrement, never below zero
+        """
+        task = self.db.tasks.find_one_and_update(
+            {"_id": ObjectId(task_id)},
+            {"$inc": {"pending_children": -1}},
+            return_document=ReturnDocument.AFTER
+        )
+        if task is None:
+            raise Exception("Task not found")
+
+        remaining = task.get('pending_children', 0) or 0
+        if remaining < 0:
+            # Should not happen, but never hand back a negative count.
+            self.db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"pending_children": 0}})
+            remaining = 0
+        return remaining
 
     def update_user(self, user: User) -> User:
         """

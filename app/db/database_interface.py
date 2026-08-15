@@ -104,7 +104,9 @@ class DatabaseInterface(ABC):
     @abstractmethod
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
-                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None):
+                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
+                    pending_children=0, inherited_memory_count=0, child_index=None,
+                    pending_results=None):
         pass
 
     @abstractmethod
@@ -117,4 +119,35 @@ class DatabaseInterface(ABC):
 
     @abstractmethod
     def delete_task(self, task_id) -> None:
+        pass
+
+    @abstractmethod
+    def store_child_result(self, task_id, child_index, memories) -> None:
+        """
+        Records one child's results in its own slot on the parent, atomically.
+
+        Siblings finish in whatever order their work happens to take, so appending
+        straight onto the parent's memories makes the order of the results depend on
+        timing: a slow agent's answer can end up behind a fast agent's large payload,
+        where the action-selection model is liable to miss it. Each child writes to the
+        slot matching the order it was delegated in, and the parent reads the slots back
+        in that order. Writing has to be atomic because siblings write concurrently.
+        :param task_id: The parent task
+        :param child_index: Position of the child in the parent's delegation order
+        :param memories: The memory strings this child produced
+        """
+        pass
+
+    @abstractmethod
+    def decrement_pending_children(self, task_id) -> int:
+        """
+        Decrements a task's outstanding-children counter and returns the new value.
+
+        This is the join for parallel agent calls: every child decrements when it
+        finishes, and only the one that takes the counter to zero re-queues the parent.
+        Must be atomic, or two children finishing together both read 1 and the parent runs
+        twice (or never).
+        :param task_id: The parent task
+        :return: The counter value after the decrement, never below zero
+        """
         pass

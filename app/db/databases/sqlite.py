@@ -1,6 +1,8 @@
+import functools
 import os
 import sqlite3
 import json
+import threading
 from abc import ABC
 
 from app.db.database_interface import DatabaseInterface
@@ -13,13 +15,44 @@ SQLITE_DB_PATH = os.getenv('SQLITE_DB_PATH')  # sqlite.db
 THIS_FOLDER = os.path.dirname(os.path.abspath(__file__))
 
 
+def _synchronized(method):
+    """
+    Serializes a database method against the shared connection.
+
+    The connection is handed to every ChatQueue and TaskManager worker as well as to each
+    request handler, and sqlite3 forbids using one connection from several threads. The
+    server only gets away with it today because gevent turns those workers into greenlets
+    that all share a single OS thread; the same code raises
+    "SQLite objects created in a thread can only be used in that same thread" as soon as
+    real threads are involved. Holding a lock for the whole method also keeps a cursor and
+    its commit from interleaving with another caller's statements.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class SQLite(DatabaseInterface, ABC):
 
     def __init__(self):
-        self.conn = sqlite3.connect(os.path.abspath(os.path.join(THIS_FOLDER, '../../', SQLITE_DB_PATH)))
+        # Re-entrant so that a synchronized method may call another one.
+        self._lock = threading.RLock()
+        self.conn = sqlite3.connect(
+            os.path.abspath(os.path.join(THIS_FOLDER, '../../', SQLITE_DB_PATH)),
+            # Safe because _synchronized serializes every access to this connection.
+            check_same_thread=False,
+        )
         self.conn.row_factory = sqlite3.Row
+        # WAL lets readers run while a write is in progress; busy_timeout waits for a
+        # competing writer (another process holding the same file) instead of failing.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.create_tables()
 
+    @_synchronized
     def create_tables(self):
         cursor = self.conn.cursor()
 
@@ -73,7 +106,11 @@ class SQLite(DatabaseInterface, ABC):
                 "depths" TEXT,
                 "is_top_level" INTEGER DEFAULT 0,
                 "top_level_task_max_depth" INTEGER,
-                "top_level_task_depth" INTEGER
+                "top_level_task_depth" INTEGER,
+                "pending_children" INTEGER DEFAULT 0,
+                "inherited_memory_count" INTEGER DEFAULT 0,
+                "child_index" INTEGER,
+                "pending_results" TEXT
             )
         '''
 
@@ -96,6 +133,20 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute(sql_task)
         cursor.execute(sql_connection_string)
 
+        # CREATE TABLE IF NOT EXISTS leaves an existing table alone, so columns added
+        # after a database was first created have to be applied separately.
+        existing = {row['name'] for row in cursor.execute("PRAGMA table_info(task)")}
+        for column, ddl in (
+                ('pending_children', 'ALTER TABLE task ADD COLUMN pending_children INTEGER DEFAULT 0'),
+                ('inherited_memory_count',
+                 'ALTER TABLE task ADD COLUMN inherited_memory_count INTEGER DEFAULT 0'),
+                ('child_index', 'ALTER TABLE task ADD COLUMN child_index INTEGER'),
+                ('pending_results', 'ALTER TABLE task ADD COLUMN pending_results TEXT'),
+        ):
+            if column not in existing:
+                print(f"[SQLite] Adding missing column task.{column}")
+                cursor.execute(ddl)
+
         self.conn.commit()
 
     def _serialize_list(self, data):
@@ -104,6 +155,7 @@ class SQLite(DatabaseInterface, ABC):
     def _deserialize_list(self, data):
         return json.loads(data) if data else []
 
+    @_synchronized
     def create_user(self, username, password) -> User:
         cursor = self.conn.cursor()
         cursor.execute("INSERT INTO user (username, password, workspaces, last_workspace_id) VALUES (?, ?, ?, ?)",
@@ -112,6 +164,7 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return User(user_id=str(user_id), username=username, password=password, workspaces=[], last_workspace_id=None)
 
+    @_synchronized
     def create_workspace(self, user_id, name, agents) -> Workspace:
         cursor = self.conn.cursor()
         cursor.execute("INSERT INTO workspace (owner, name, agents, last_chat_id, coordinator_agent) VALUES (?, ?, ?, ?, ?)",
@@ -126,6 +179,7 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return Workspace(workspace_id=str(workspace_id), name=name, agents=agents, owner=user_id, last_chat_id=None)
 
+    @_synchronized
     def get_user_workspaces(self, user_id) -> list[Workspace]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT workspaces FROM user WHERE id = ?", (user_id,))
@@ -135,6 +189,7 @@ class SQLite(DatabaseInterface, ABC):
         workspaces = self._deserialize_list(row['workspaces'])
         return [self.get_workspace(workspace_id) for workspace_id in workspaces]
 
+    @_synchronized
     def get_workspace(self, workspace_id) -> Workspace:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,))
@@ -150,17 +205,20 @@ class SQLite(DatabaseInterface, ABC):
             coordinator_agent=str(row['coordinator_agent']) if row['coordinator_agent'] else None
         )
 
+    @_synchronized
     def delete_workspace(self, workspace_id) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM workspace WHERE id = ?", (workspace_id,))
         self.conn.commit()
 
+    @_synchronized
     def get_workspace_chats(self, workspace_id) -> list[str]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT id FROM chat WHERE workspace_id = ?", (workspace_id,))
         chats = cursor.fetchall()
         return [str(chat['id']) for chat in chats]
 
+    @_synchronized
     def get_user_by_id(self, user_id) -> User:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM user WHERE id = ?", (user_id,))
@@ -175,6 +233,7 @@ class SQLite(DatabaseInterface, ABC):
             last_workspace_id=str(row['last_workspace_id']) if row['last_workspace_id'] else None
         )
 
+    @_synchronized
     def get_user_by_username(self, username) -> User:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM user WHERE username = ?", (username,))
@@ -189,6 +248,7 @@ class SQLite(DatabaseInterface, ABC):
             last_workspace_id=str(row['last_workspace_id']) if row['last_workspace_id'] else None
         )
 
+    @_synchronized
     def update_chat(self, chat: Chat) -> Chat:
         cursor = self.conn.cursor()
         cursor.execute("UPDATE chat SET workspace_id = ?, owner = ?, chat_history = ?, busy = ? WHERE id = ?", (
@@ -197,6 +257,7 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return chat
 
+    @_synchronized
     def get_chat_by_id(self, chat_id) -> Chat:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM chat WHERE id = ?", (chat_id,))
@@ -211,6 +272,7 @@ class SQLite(DatabaseInterface, ABC):
             busy=bool(row['busy'])
         )
 
+    @_synchronized
     def get_task_data(self, task_id) -> dict:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM task WHERE id = ?", (task_id,))
@@ -232,21 +294,32 @@ class SQLite(DatabaseInterface, ABC):
             "depths": self._deserialize_list(row['depths']),
             "is_top_level": bool(row['is_top_level']),
             "top_level_task_max_depth": row['top_level_task_max_depth'],
-            "top_level_task_depth": row['top_level_task_depth']
+            "top_level_task_depth": row['top_level_task_depth'],
+            "pending_children": row['pending_children'] or 0,
+            "inherited_memory_count": row['inherited_memory_count'] or 0,
+            "child_index": row['child_index'],
+            "pending_results": json.loads(row['pending_results']) if row['pending_results'] else {}
         }
         return task_data
 
+    @_synchronized
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
-                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None):
+                    is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
+                    pending_children=0, inherited_memory_count=0, child_index=None,
+                    pending_results=None):
         cursor = self.conn.cursor()
 
         cursor.execute(
-            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children, inherited_memory_count, child_index, pending_results) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chat_id, json.dumps(agents), owner, coordinator_agent, current_agent, json.dumps(memories), parent_task_id,
              top_level_task_id, int(completed), created_at, json.dumps(depths), int(is_top_level),
              top_level_task_max_depth,
-             top_level_task_depth)
+             top_level_task_depth,
+             int(pending_children),
+             int(inherited_memory_count),
+             child_index,
+             json.dumps(pending_results or {}))
         )
 
         task_id = cursor.lastrowid
@@ -266,7 +339,11 @@ class SQLite(DatabaseInterface, ABC):
             "depths": depths,
             "is_top_level": is_top_level,
             "top_level_task_max_depth": top_level_task_max_depth,
-            "top_level_task_depth": top_level_task_depth
+            "top_level_task_depth": top_level_task_depth,
+            "pending_children": pending_children,
+            "inherited_memory_count": inherited_memory_count,
+            "child_index": child_index,
+            "pending_results": pending_results or {}
         }
 
         print(f"CREATING TASK:")
@@ -274,6 +351,7 @@ class SQLite(DatabaseInterface, ABC):
 
         return task_data
 
+    @_synchronized
     def create_chat_connection_string(self, chat_id, string, created_at, expires_at,
                                       created_by) -> ChatConnectionString:
         cursor = self.conn.cursor()
@@ -289,6 +367,7 @@ class SQLite(DatabaseInterface, ABC):
             created_by=created_by
         )
 
+    @_synchronized
     def get_chat_connection_string(self, string) -> ChatConnectionString:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
@@ -303,11 +382,13 @@ class SQLite(DatabaseInterface, ABC):
             created_by=str(row['created_by'])
         )
 
+    @_synchronized
     def delete_chat_connection_string(self, string) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM chat_connection_string WHERE string = ?", (string,))
         self.conn.commit()
 
+    @_synchronized
     def create_chat(self, workspace_id, user_id) -> Chat:
         cursor = self.conn.cursor()
         cursor.execute("INSERT INTO chat (workspace_id, owner, chat_history, busy) VALUES (?, ?, ?, ?)",
@@ -316,33 +397,38 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return Chat(chat_id=str(chat_id), workspace_id=workspace_id, owner=user_id, chat_history=[], busy=False)
 
+    @_synchronized
     def delete_chat(self, chat_id) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM chat WHERE id = ?", (chat_id,))
         self.conn.commit()
 
+    @_synchronized
     def delete_task(self, task_id) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM task WHERE id = ?", (task_id,))
         self.conn.commit()
 
+    @_synchronized
     def delete_user(self, user_id) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM user WHERE id = ?", (user_id,))
         self.conn.commit()
 
+    @_synchronized
     def get_user_chats(self, user_id) -> list[str]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT id FROM chat WHERE owner = ?", (user_id,))
         chats = cursor.fetchall()
         return [str(chat['id']) for chat in chats]
 
+    @_synchronized
     def update_task_data(self, task_data) -> dict:
         cursor = self.conn.cursor()
         print(f"UPDATING TASK")
         print(json.dumps(task_data))
         cursor.execute(
-            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ? WHERE id = ?",
+            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ?, inherited_memory_count = ?, child_index = ?, pending_results = ? WHERE id = ?",
             (
                 task_data['chat_id'],
                 json.dumps(task_data['agents']),
@@ -358,11 +444,44 @@ class SQLite(DatabaseInterface, ABC):
                 int(task_data.get('is_top_level', False)),
                 task_data.get('top_level_task_max_depth', None),
                 task_data.get('top_level_task_depth', None),
+                int(task_data.get('pending_children', 0) or 0),
+                int(task_data.get('inherited_memory_count', 0) or 0),
+                task_data.get('child_index', None),
+                json.dumps(task_data.get('pending_results', {}) or {}),
                 task_data.get('task_id', None)
             ))
         self.conn.commit()
         return task_data
 
+    @_synchronized
+    def store_child_result(self, task_id, child_index, memories) -> None:
+        # The whole method runs under the lock, so the read and the write cannot be split
+        # by a sibling storing its own slot.
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pending_results FROM task WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        if row is None:
+            raise Exception("Task not found")
+        results = json.loads(row['pending_results']) if row['pending_results'] else {}
+        results[str(child_index)] = list(memories)
+        cursor.execute("UPDATE task SET pending_results = ? WHERE id = ?",
+                       (json.dumps(results), task_id))
+        self.conn.commit()
+
+    @_synchronized
+    def decrement_pending_children(self, task_id) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE task SET pending_children = MAX(COALESCE(pending_children, 0) - 1, 0) WHERE id = ?",
+            (task_id,))
+        cursor.execute("SELECT pending_children FROM task WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        self.conn.commit()
+        if row is None:
+            raise Exception("Task not found")
+        return int(row['pending_children'] or 0)
+
+    @_synchronized
     def update_user(self, user: User) -> User:
         cursor = self.conn.cursor()
         cursor.execute("UPDATE user SET username = ?, password = ?, workspaces = ?, last_workspace_id = ? WHERE id = ?", (
@@ -375,6 +494,7 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return user
 
+    @_synchronized
     def update_workspace(self, workspace: Workspace) -> Workspace:
         cursor = self.conn.cursor()
         cursor.execute("UPDATE workspace SET name = ?, agents = ?, owner = ?, last_chat_id = ?, coordinator_agent = ? WHERE id = ?", (
@@ -388,6 +508,7 @@ class SQLite(DatabaseInterface, ABC):
         self.conn.commit()
         return workspace
 
+    @_synchronized
     def create_chat_message_string(self, chat_id, string, created_at, expires_at, created_by) -> ChatConnectionString:
         cursor = self.conn.cursor()
         cursor.execute("INSERT INTO chat_connection_string (chat_id, string, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?)", (chat_id, string, created_at, expires_at, created_by))
@@ -400,6 +521,7 @@ class SQLite(DatabaseInterface, ABC):
             created_by=created_by
         )
 
+    @_synchronized
     def get_chat_message_string(self, string) -> ChatConnectionString:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
@@ -414,6 +536,7 @@ class SQLite(DatabaseInterface, ABC):
             created_by=str(row['created_by'])
         )
 
+    @_synchronized
     def delete_chat_message_string(self, string) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM chat_connection_string WHERE string = ?", (string,))

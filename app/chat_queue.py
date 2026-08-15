@@ -1,4 +1,5 @@
 
+import json
 import queue
 import threading
 import traceback
@@ -38,9 +39,13 @@ class Worker(threading.Thread):
                 chat = db.get_chat_by_id(chat_id)
 
                 if chat.busy:
+                    # The payload used to be commented out, so the client received an
+                    # event with no data and printed nothing useful.
                     self.socketio.emit(
                         'chat_information',
-                        #json.dumps({"type": "busy", "message": "This chat is processing your previous request, please wait."}),
+                        json.dumps({"type": "busy", "chat_id": chat_id,
+                                    "message": "This chat is still processing your previous "
+                                               "request, please wait."}),
                         room=chat_id,
                         namespace='/chat'
                     )

@@ -101,7 +101,10 @@ class Spinner:
             sys.stdout.flush()
             time.sleep(self.delay)
 
-        sys.stdout.write('\r' + '' * (len(self.message) + 2) + '\r')  # Clear line
+        # Overwrite the spinner with blanks; '' * n is the empty string and clears nothing,
+        # which left the last frame on screen in front of whatever was printed next.
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 2) + '\r')  # Clear line
+        sys.stdout.flush()
 
     def start(self):
         if self.thread and self.thread.is_alive():
