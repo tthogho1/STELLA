@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
+exclude = ["tests*"]   # the test suite is not part of the installed distribution
 
 
 [project]
@@ -59,6 +60,7 @@ requires-python = ">=3.9"
 [project.optional-dependencies]
 dev = [
     "pip-tools",
+    "pytest>=8.0.0",
     "Sphinx==7.2.6",
     "sphinx-tabs==3.4.4",
     "sphinx_design==0.5.0",
