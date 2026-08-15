@@ -105,7 +105,8 @@ class DatabaseInterface(ABC):
     def create_task(self, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
-                    pending_children=0, inherited_memory_count=0):
+                    pending_children=0, inherited_memory_count=0, child_index=None,
+                    pending_results=None):
         pass
 
     @abstractmethod
@@ -121,16 +122,19 @@ class DatabaseInterface(ABC):
         pass
 
     @abstractmethod
-    def append_task_memories(self, task_id, memories) -> None:
+    def store_child_result(self, task_id, child_index, memories) -> None:
         """
-        Appends memories to a task atomically.
+        Records one child's results in its own slot on the parent, atomically.
 
-        Several children of the same parent finish at the same time and all forward their
-        memories to it. Doing that as load -> extend -> save from the caller loses
-        whichever update lands first, so the read and the write have to happen as one
-        operation in the database.
-        :param task_id: The task to append to
-        :param memories: A list of memory strings to append
+        Siblings finish in whatever order their work happens to take, so appending
+        straight onto the parent's memories makes the order of the results depend on
+        timing: a slow agent's answer can end up behind a fast agent's large payload,
+        where the action-selection model is liable to miss it. Each child writes to the
+        slot matching the order it was delegated in, and the parent reads the slots back
+        in that order. Writing has to be atomic because siblings write concurrently.
+        :param task_id: The parent task
+        :param child_index: Position of the child in the parent's delegation order
+        :param memories: The memory strings this child produced
         """
         pass
 

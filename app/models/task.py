@@ -21,7 +21,8 @@ class Task:
     def __init__(self, task_id, chat_id, agents, owner, coordinator_agent, current_agent, memories,
                  parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                  is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
-                 pending_children=0, inherited_memory_count=0):
+                 pending_children=0, inherited_memory_count=0, child_index=None,
+                 pending_results=None):
         """
         Creates a new task in the database.
         :param task_id: The id of the task
@@ -62,6 +63,11 @@ class Task:
         # How many of self.memories were inherited from the parent at creation time.
         # Only the entries after this point were produced by this task.
         self.inherited_memory_count = inherited_memory_count or 0
+        # Position among the parent's children, so results can be collected in the
+        # order they were delegated rather than the order they happen to finish.
+        self.child_index = child_index
+        # Results handed up by children, keyed by their child_index.
+        self.pending_results = pending_results if pending_results is not None else {}
 
     @classmethod
     def create_top_level_task(cls, chat: Chat):
@@ -126,6 +132,8 @@ class Task:
             top_level_task_depth=task_data.get('top_level_task_depth', None),
             pending_children=task_data.get('pending_children', 0),
             inherited_memory_count=task_data.get('inherited_memory_count', 0),
+            child_index=task_data.get('child_index', None),
+            pending_results=task_data.get('pending_results', {}),
         )
 
     @classmethod
@@ -149,6 +157,8 @@ class Task:
             top_level_task_depth=task_data.get('top_level_task_depth', None),
             pending_children=task_data.get('pending_children', 0),
             inherited_memory_count=task_data.get('inherited_memory_count', 0),
+            child_index=task_data.get('child_index', None),
+            pending_results=task_data.get('pending_results', {}),
         )
 
     def check_max_depth_reached(self, selected_agent, top_level_task):
@@ -178,6 +188,28 @@ class Task:
 
         db.update_task_data(top_level_task.to_dict())
         return result
+
+    def _collect_child_results(self):
+        """
+        Folds the slots the children wrote into this task's memories, in the order the
+        children were delegated in.
+
+        Children finish in whatever order their work takes, so collecting on arrival would
+        make the order of the results depend on timing -- and a slow agent's short answer
+        landing behind a fast agent's large payload is exactly the arrangement the
+        action-selection model tends to overlook. Runs when the task is picked up again,
+        by which point every sibling has reported and nothing else is writing.
+        """
+        if not self.pending_results:
+            return
+
+        for key in sorted(self.pending_results, key=lambda k: int(k)):
+            self.memories.extend(self.pending_results[key])
+
+        print(f"[TASK] -- Collected results from {len(self.pending_results)} child slot(s) "
+              f"in delegation order")
+        self.pending_results = {}
+        db.update_task_data(self.to_dict())
 
     def _emit_progress(self, socketio, message):
         """
@@ -263,6 +295,9 @@ class Task:
         # 3.2.3.2 Re-queue the parent task
         chat = db.get_chat_by_id(self.chat_id)
 
+        # 0. Fold in whatever the children reported while this task was parked.
+        self._collect_child_results()
+
         # 1. Load the current agent
         current_agent = agent_storage.load(self.current_agent)
         print(f"[TASK] -- Loaded current agent: {current_agent.name}")
@@ -337,7 +372,7 @@ class Task:
                                 else f"Asking {names} in parallel…")
 
             child_task_ids = []
-            for action in delegated:
+            for child_index, action in enumerate(delegated):
                 # 3.1.1 Load the agent
                 selected_agent = action_map[action]
                 print(f"[TASK] -- Fetched agent information for: {selected_agent.name}")
@@ -358,6 +393,9 @@ class Task:
                     # how many, so that on completion it forwards only what it produced
                     # itself instead of handing the parent its own entries back.
                     inherited_memory_count=len(self.memories),
+                    # Slot this child writes its results into, so they come back in the
+                    # order they were asked for rather than the order they complete.
+                    child_index=child_index,
                 )
                 child_task_ids.append(new_task_data['task_id'])
 
@@ -413,16 +451,21 @@ class Task:
             # context window.
             own_memories = self.memories[self.inherited_memory_count:]
 
+            # Results go into this child's slot rather than straight onto the parent's
+            # memories, so the parent can read them back in delegation order.
+            slot = self.child_index if self.child_index is not None else 0
+
             if current_agent.forward_all_memory_entries_to_parent:  # If all
-                print(f"[TASK] -- Forwarding {len(own_memories)} own memory entrie(s) to "
-                      f"parent task {self.parent_task_id} "
+                print(f"[TASK] -- Forwarding {len(own_memories)} own memory entrie(s) into "
+                      f"slot {slot} of parent task {self.parent_task_id} "
                       f"(holding {len(self.memories)}, {self.inherited_memory_count} inherited)")
-                db.append_task_memories(self.parent_task_id, own_memories)
+                db.store_child_result(self.parent_task_id, slot, own_memories)
             elif current_agent.forward_last_memory_to_parent:  # If last
                 if own_memories:
-                    print(f"[TASK] -- Forwarding last memory to parent task {self.parent_task_id}")
+                    print(f"[TASK] -- Forwarding last memory into slot {slot} of parent task "
+                          f"{self.parent_task_id}")
                     print(f"[TASK] -- Last memory: {own_memories[-1]}")
-                    db.append_task_memories(self.parent_task_id, [own_memories[-1]])
+                    db.store_child_result(self.parent_task_id, slot, [own_memories[-1]])
 
         if current_agent.on_completion is not None:
             print(f"[TASK] -- Agent {self.current_agent} has on_completion function, calling it")
@@ -468,4 +511,6 @@ class Task:
             "top_level_task_depth": self.top_level_task_depth,
             "pending_children": self.pending_children,
             "inherited_memory_count": self.inherited_memory_count,
+            "child_index": self.child_index,
+            "pending_results": self.pending_results,
         }
