@@ -10,6 +10,25 @@ import dotenv
 dotenv.load_dotenv()
 
 
+def _int_env(name, default):
+    try:
+        return max(int(os.getenv(name, default)), 0)
+    except (TypeError, ValueError):
+        print(f"[OPENAI] {name} is not a number, falling back to {default}")
+        return int(default)
+
+
+# Retries cover rate limits (429, honouring Retry-After), 5xx and connection errors, with
+# exponential backoff and jitter, and are applied per request inside the SDK. Errors that
+# retrying cannot fix -- a bad key, or a prompt over the context window -- still fail
+# immediately. Without a timeout a stalled request holds one of the workers below forever.
+OPENAI_MAX_RETRIES = _int_env("OPENAI_MAX_RETRIES", 4)
+OPENAI_TIMEOUT_SECONDS = _int_env("OPENAI_TIMEOUT_SECONDS", 120)
+# How many requests may be in flight at once. Each worker holds one, so this is also the
+# lever for staying inside an account's rate limits.
+OPENAI_MAX_WORKERS = _int_env("OPENAI_MAX_WORKERS", 30) or 1
+
+
 def _build_client():
     """
     Builds the OpenAI client.
@@ -21,14 +40,15 @@ def _build_client():
     of the path. Without monkey patching this is simply the normal verification path.
     """
     api_key = os.getenv("OPENAI_API_KEY")
+    settings = {"max_retries": OPENAI_MAX_RETRIES, "timeout": OPENAI_TIMEOUT_SECONDS}
     try:
         import certifi
         context = ssl.create_default_context(cafile=certifi.where())
-        return OpenAI(api_key=api_key, http_client=DefaultHttpxClient(verify=context))
+        return OpenAI(api_key=api_key, http_client=DefaultHttpxClient(verify=context), **settings)
     except Exception as e:
         print(f"[OPENAI] Could not build a certifi-backed HTTP client ({type(e).__name__}: {e}), "
               f"falling back to SDK defaults")
-        return OpenAI(api_key=api_key)
+        return OpenAI(api_key=api_key, **settings)
 
 
 client = _build_client()
@@ -66,10 +86,12 @@ class OpenAIClient:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, max_workers: int = 30):
+    def __init__(self, max_workers: int = None):
         if hasattr(self, '_initialized'):  # Singleton
             return
         self._initialized = True
+
+        max_workers = OPENAI_MAX_WORKERS if max_workers is None else max_workers
 
         self.max_workers = max_workers
 
@@ -104,8 +126,8 @@ class OpenAIClient:
         :param query:
         :return:
         """
-        # TODO: Add rate limiting and retry with exponential backoff
-        # TODO: https://platform.openai.com/docs/guides/rate-limits/error-mitigation
+        # Retries and backoff are handled by the SDK client (OPENAI_MAX_RETRIES), and the
+        # size of the worker pool caps how many requests are in flight at once.
         try:
             if query.query_type == "chat_completion":
 
