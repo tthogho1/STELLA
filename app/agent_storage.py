@@ -1,5 +1,6 @@
 import os
 import importlib.util
+import traceback
 
 from app.models.agent import Agent
 
@@ -37,14 +38,27 @@ class AgentStorage:
                 self._load_agent_from_file(full_path, entry)
 
     def _load_agent_from_file(self, file_path, filename):
-        """ Load an agent from a Python file. """
+        """
+        Load an agent from a Python file.
+
+        Agents are third-party code dropped into a directory, and one of them failing to
+        import -- a missing optional dependency is the usual reason -- must not stop the
+        server from starting with the rest. The file is skipped with an explanation
+        instead.
+        """
         # Generate a module name based on the filename
         module_name = filename[:-3]
 
         # Load and import the module
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            print(f"[AgentStorage] !! Skipping {filename}, it could not be imported "
+                  f"({type(e).__name__}: {e})")
+            traceback.print_exc()
+            return
 
         # Iterate over all attributes in the module
         for attribute_name in dir(module):
@@ -53,7 +67,18 @@ class AgentStorage:
             # If the attribute is a class, is a subclass of Agent, and isn't Agent itself
             if isinstance(attribute, type) and issubclass(attribute, Agent) and attribute != Agent:
                 # Instantiate the agent and add to the storage
-                agent_instance = attribute()
+                try:
+                    agent_instance = attribute()
+                except Exception as e:
+                    # Every agent class has to be constructible with no arguments.
+                    print(f"[AgentStorage] !! Skipping {attribute_name} in {filename}, it could "
+                          f"not be constructed ({type(e).__name__}: {e})")
+                    traceback.print_exc()
+                    continue
+
+                if agent_instance.agent_id in self.agents:
+                    print(f"[AgentStorage] !! Duplicate agent_id '{agent_instance.agent_id}' "
+                          f"in {filename}; the previous one is being replaced")
                 self.agents[agent_instance.agent_id] = agent_instance
 
     def load(self, agent_id: str):

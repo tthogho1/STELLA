@@ -58,6 +58,14 @@ dependencies = [
 requires-python = ">=3.9"
 
 [project.optional-dependencies]
+# Needed by app/agents/CustomAgents/CitySearchAgent.py. Without it that one agent is
+# skipped at startup with a message and the rest still load.
+# The Databricks Vector Search client that app/tools/city_search.py imports lazily
+# (databricks.ai_search.client) is not listed: install whichever distribution provides
+# that import path in your workspace.
+city-search = [
+    "langchain-core >= 0.3.0",
+]
 dev = [
     "pip-tools",
     "pytest>=8.0.0",
