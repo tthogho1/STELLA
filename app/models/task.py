@@ -241,29 +241,24 @@ class Task:
                 print(f"[TASK] -- Last memory: {own_memories[-1]}")
                 db.store_child_result(self.parent_task_id, slot, [own_memories[-1]])
 
-    def _emit_progress(self, socketio, message):
+    def _emit_progress(self, events, message):
         """
         Sends a progress line on the chat_information event.
 
         This is deliberately a different event from 'message': the client treats a chat
         message as the end of the request, and progress updates must not stop it waiting.
-        :param socketio: The socketio instance
+        :param events: The EventSink to report to
         :param message: Human readable text, e.g. "Asking WEATHER, BREWERY"
         """
         if not EMIT_PROGRESS_EVENTS:
             return
         try:
-            socketio.emit(
-                'chat_information',
-                json.dumps({"type": "progress", "message": message, "chat_id": self.chat_id}),
-                room=self.chat_id,
-                namespace='/chat'
-            )
+            events.send_progress(self.chat_id, message)
         except Exception as e:
             # Progress is cosmetic; never let it break the task it is reporting on.
             print(f"[TASK] !! Could not emit progress ({type(e).__name__}: {e})")
 
-    def _report_to_parent(self, chat, socketio, give_up_message=None):
+    def _report_to_parent(self, chat, events, give_up_message=None):
         """
         Hands control back up the tree once this task is finished.
 
@@ -271,14 +266,14 @@ class Task:
         decrementing the counter leaves its parent waiting on a sibling that never
         arrives, which strands the chat on busy=True.
         :param chat: The chat this task belongs to
-        :param socketio: Used to tell the user when a top level task gave up
+        :param events: Used to tell the user when a top level task gave up
         :param give_up_message: Set when the task stopped early rather than completing
         :return: The parent task id to re-queue, or None
         """
         if self.parent_task_id is None:
             # Nothing above us: close the request out so the user can send another message.
             if give_up_message:
-                socketio.emit('message', give_up_message, room=self.chat_id, namespace='/chat')
+                events.send_message(self.chat_id, give_up_message)
             print(f"[TASK] -- Top level task {self.task_id} finished without a response")
             chat.busy = False
             db.update_chat(chat)
@@ -293,14 +288,14 @@ class Task:
         print(f"[TASK] -- Last sibling done, re-queuing parent task {self.parent_task_id}")
         return self.parent_task_id
 
-    def execute(self, agent_storage: AgentStorage, openai_client: OpenAIClient, socketio,
+    def execute(self, agent_storage: AgentStorage, openai_client: OpenAIClient, events,
                 request_builder: RequestBuilder):
         """
         Executes the task
         :param request_builder: Singleton instance of RequestBuilder (to build API Calls etc)
         :param agent_storage: Singleton instance of AgentStorage containing all agents (to load agents)
         :param openai_client: Singleton instance of OpenAIClient (to communicate with OpenAI)
-        :param socketio: Singleton instance of SocketIO (to communicate with the user)
+        :param events: EventSink the runtime reports answers and progress to
         :return:
         """
         print(f"[Task] ---- Executing task: {self.task_id}")
@@ -341,7 +336,7 @@ class Task:
             print(f"[TASK] -- {depth_check_result['message']}")
             # A subtask that gives up still has to report back, otherwise its parent waits
             # on a sibling that will never arrive and the chat stays busy forever.
-            return self._report_to_parent(chat, socketio, give_up_message=depth_check_result['message'])
+            return self._report_to_parent(chat, events, give_up_message=depth_check_result['message'])
 
         # 2. Perform action selection (if not disabled)
         selected_action = "0"  # Default to "Done"
@@ -398,7 +393,7 @@ class Task:
             db.update_task_data(self.to_dict())
 
             names = ", ".join(action_map[a].name for a in delegated)
-            self._emit_progress(socketio, f"Asking {names}…" if len(delegated) == 1
+            self._emit_progress(events, f"Asking {names}…" if len(delegated) == 1
                                 else f"Asking {names} in parallel…")
 
             child_task_ids = []
@@ -440,7 +435,7 @@ class Task:
             # Subtasks say nothing here: the parent already announced them when it
             # delegated, and repeating it just doubles every line.
             if self.parent_task_id is None:
-                self._emit_progress(socketio, "Writing the answer…")
+                self._emit_progress(events, "Writing the answer…")
             response = current_agent.respond(
                 openai_client=openai_client,
                 request_builder=request_builder,
@@ -455,7 +450,7 @@ class Task:
             if self.parent_task_id is None:
                 # 3.2.2.1 Send message to user
                 print(f"[TASK] ---- Sending message to user: {response}")
-                socketio.emit('message', response, room=self.chat_id, namespace='/chat')
+                events.send_message(self.chat_id, response)
 
                 # 3.2.2.2 Save message in Chat object in database
                 chat.add_message(role="assistant", content=response)
@@ -468,7 +463,7 @@ class Task:
         db.update_task_data(self.to_dict())
 
         if self.parent_task_id is not None:
-            self._emit_progress(socketio, f"{current_agent.name} done")
+            self._emit_progress(events, f"{current_agent.name} done")
 
         # 3.2.3 If task is a subtask, tell parent task
         # 3.2.3.1 Pass memories to parent task if necessary
@@ -476,10 +471,13 @@ class Task:
 
         if current_agent.on_completion is not None:
             print(f"[TASK] -- Agent {self.current_agent} has on_completion function, calling it")
-            current_agent.on_completion(socketio=socketio, chat_id=self.chat_id, chat=chat, memories=self.memories, openai_client=openai_client)
+            # Still passed as socketio=: agents were written against that keyword and call
+            # .emit() on it, which EventSink keeps. Renaming it would break every existing
+            # on_completion callback for no gain.
+            current_agent.on_completion(socketio=events, chat_id=self.chat_id, chat=chat, memories=self.memories, openai_client=openai_client)
 
         # 3.2.3.2 Re-queue the parent task, but only once every sibling has reported back.
-        return self._report_to_parent(chat, socketio)
+        return self._report_to_parent(chat, events)
 
 
     def __str__(self):

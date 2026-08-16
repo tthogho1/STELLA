@@ -8,16 +8,10 @@ parent forever -- and takes a successful sibling's result down with it.
 import threading
 import types
 
-
-class _Socket:
-    def __init__(self):
-        self.emitted = []
-
-    def emit(self, event, *args, **kwargs):
-        self.emitted.append((event, args[0] if args else None))
+from app.events import CollectingSink
 
 
-def _worker(db, socketio=None):
+def _worker(db, events=None):
     """A Worker with its queue and pool stubbed out."""
     from app.task_manager import Worker
     import app.task_manager
@@ -27,7 +21,7 @@ def _worker(db, socketio=None):
     threading.Thread.__init__(worker, name="test-worker")
     queued = []
     worker.manager = types.SimpleNamespace(
-        socketio=socketio or _Socket(),
+        events=events or CollectingSink(),
         add_task=queued.append,
     )
     worker.queued = queued
@@ -67,12 +61,11 @@ def test_the_user_is_told_which_agent_failed(db, make_task):
     parent_id = make_task(pending_children=1)
     child_id = make_task(parent_task_id=parent_id, child_index=0)
 
-    socket = _Socket()
-    _worker(db, socket)._handle_failure(child_id)
+    sink = CollectingSink()
+    _worker(db, sink)._handle_failure(child_id)
 
-    events = [e for e, _ in socket.emitted]
-    assert "chat_information" in events
-    assert "failed" in str(socket.emitted)
+    assert any("failed" in (p or "") for p in sink.progress())
+    assert sink.messages() == [], "a failed subtask must not look like the answer"
 
 
 def test_a_failed_top_level_task_ends_the_request(db, make_task):
@@ -86,13 +79,13 @@ def test_a_failed_top_level_task_ends_the_request(db, make_task):
     task = db.create_task(chat_id=chat.chat_id, agents={}, owner=user.id,
                           coordinator_agent="c", current_agent="c", memories=[])
 
-    socket = _Socket()
-    worker = _worker(db, socket)
+    sink = CollectingSink()
+    worker = _worker(db, sink)
     worker._handle_failure(task["task_id"])
 
     assert db.get_chat_by_id(chat.chat_id).busy is False
     assert worker.queued == []
-    assert any(event == "message" for event, _ in socket.emitted)
+    assert len(sink.messages()) == 1, "the user has to be told the request ended"
 
 
 def test_an_unloadable_task_still_unblocks_the_chat(db):

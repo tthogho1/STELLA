@@ -10,12 +10,12 @@ from app.task_manager import TaskManager, Task
 
 
 class Worker(threading.Thread):
-    def __init__(self, chat_queue, manager, task_manager, socketio):
+    def __init__(self, chat_queue, manager, task_manager, events):
         threading.Thread.__init__(self)
         self.chat_queue = chat_queue
         self.manager = manager
         self.task_manager = task_manager
-        self.socketio = socketio
+        self.events = events
         self.daemon = True
 
     def run(self):
@@ -41,14 +41,10 @@ class Worker(threading.Thread):
                 if chat.busy:
                     # The payload used to be commented out, so the client received an
                     # event with no data and printed nothing useful.
-                    self.socketio.emit(
-                        'chat_information',
-                        json.dumps({"type": "busy", "chat_id": chat_id,
-                                    "message": "This chat is still processing your previous "
-                                               "request, please wait."}),
-                        room=chat_id,
-                        namespace='/chat'
-                    )
+                    self.events.send_progress(
+                        chat_id,
+                        "This chat is still processing your previous request, please wait.",
+                        kind="busy")
 
                 chat.busy = True
                 db.update_chat(chat)
@@ -77,24 +73,21 @@ class Worker(threading.Thread):
             chat = db.get_chat_by_id(chat_id)
             chat.busy = False
             db.update_chat(chat)
-            self.socketio.emit(
-                'message',
-                "Sorry, something went wrong while starting your request. Please try again.",
-                room=chat_id,
-                namespace='/chat'
-            )
+            self.events.send_message(
+                chat_id,
+                "Sorry, something went wrong while starting your request. Please try again.")
         except Exception as e:
             print(f"[ChatQueue] !! Could not release the chat {chat_id}: {e}")
 
 
 class ChatQueue:
-    def __init__(self, num_workers, socketio, agent_storage):
+    def __init__(self, num_workers, events, agent_storage):
         self.num_workers = num_workers
-        self.socketio = socketio
+        self.events = events
         self.agent_storage = agent_storage
         self.chat_queue = queue.Queue()
-        self.task_manager = TaskManager(num_workers=5, socketio=socketio, agent_storage=agent_storage)
-        self.workers = [Worker(self.chat_queue, self, task_manager=self.task_manager, socketio=socketio) for _ in range(num_workers)]
+        self.task_manager = TaskManager(num_workers=5, events=events, agent_storage=agent_storage)
+        self.workers = [Worker(self.chat_queue, self, task_manager=self.task_manager, events=events) for _ in range(num_workers)]
         self.active_chats = []
         for worker in self.workers:
             print(f"[ChatQueue] Starting worker {worker}")

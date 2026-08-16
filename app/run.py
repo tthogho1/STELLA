@@ -3,7 +3,7 @@ import os
 import gevent.monkey
 gevent.monkey.patch_all()
 
-from app import create_app
+from app.server import create_app
 import argparse
 
 from dotenv import load_dotenv

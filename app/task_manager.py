@@ -36,7 +36,7 @@ class Worker(threading.Thread):
                 task = Task.load(task_id)
                 # execute() returns the next task id, a list of them when an agent
                 # delegated to several agents at once, or None when nothing follows.
-                result = task.execute(self.agent_storage, self.openai_client, self.manager.socketio, self.request_builder)
+                result = task.execute(self.agent_storage, self.openai_client, self.manager.events, self.request_builder)
                 if result is not None:
                     new_task_ids = result if isinstance(result, list) else [result]
                     for new_task_id in new_task_ids:
@@ -81,13 +81,8 @@ class Worker(threading.Thread):
 
         agent = task_data.get('current_agent') or 'An agent'
         try:
-            self.manager.socketio.emit(
-                'chat_information',
-                json.dumps({"type": "progress", "chat_id": task_data.get('chat_id'),
-                            "message": f"{agent} failed, continuing without it"}),
-                room=task_data.get('chat_id'),
-                namespace='/chat'
-            )
+            self.manager.events.send_progress(
+                task_data.get('chat_id'), f"{agent} failed, continuing without it")
         except Exception as e:
             print(f"[TaskQueue] !! Could not report the failure of task {task_id}: {e}")
 
@@ -115,19 +110,16 @@ class Worker(threading.Thread):
             chat = db.get_chat_by_id(db.get_task_data(task_id)['chat_id'])
             chat.busy = False
             db.update_chat(chat)
-            self.manager.socketio.emit(
-                'message',
-                "Sorry, something went wrong while processing your request. Please try again.",
-                room=chat.chat_id,
-                namespace='/chat'
-            )
+            self.manager.events.send_message(
+                chat.chat_id,
+                "Sorry, something went wrong while processing your request. Please try again.")
         except Exception as e:
             print(f"[TaskQueue] !! Could not release the chat for task {task_id}: {e}")
 
 
 class TaskManager:
-    def __init__(self, num_workers, socketio, agent_storage):
-        self.socketio = socketio
+    def __init__(self, num_workers, events, agent_storage):
+        self.events = events
         self.task_queue = queue.Queue()
         self.agent_storage = agent_storage
         self.openai_client = OpenAIClient()
