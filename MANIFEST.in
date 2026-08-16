@@ -2,5 +2,12 @@ include LICENSE
 include README.md
 include cli/config.json
 include app/.env_template
-include app/.env
-include cli/session.json
+
+# app/.env and cli/session.json used to be listed here. They are a developer's own
+# OpenAI key and login token, and .gitignore does not apply to sdists: `python -m build`
+# packaged the key straight into stella_cli-*.tar.gz. Both files are created at runtime
+# and must never be shipped.
+exclude app/.env
+exclude cli/session.json
+global-exclude *.db *.db-wal *.db-shm
+global-exclude __pycache__ *.py[cod]
