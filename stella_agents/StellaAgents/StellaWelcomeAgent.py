@@ -1,6 +1,6 @@
-from app.models.agent import Agent
-from app.models.chat import Chat
-from app.openai_client import OpenAIClient
+from stella_core.models.agent import Agent
+from stella_core.models.chat import Chat
+from stella_core.openai_client import OpenAIClient
 
 
 class StellaWelcomeAgent(Agent):

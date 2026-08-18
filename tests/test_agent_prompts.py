@@ -11,13 +11,13 @@ from conftest import make_chat
 
 
 def _agent(agent_id="a", name="A", description="d"):
-    from app.models.agent import Agent
+    from stella_core.models.agent import Agent
     return Agent(agent_id=agent_id, name=name, short_description=description)
 
 
 class TestPromptCaps:
     def test_only_the_newest_memories_are_kept(self):
-        from app.models.agent import Agent, MAX_MEMORY_ENTRIES
+        from stella_core.models.agent import Agent, MAX_MEMORY_ENTRIES
 
         built = Agent._construct_memory_string([f"entry{i}" for i in range(50)])
 
@@ -26,7 +26,7 @@ class TestPromptCaps:
         assert "entry49" in built and "entry0\n" not in built
 
     def test_a_single_oversized_entry_is_truncated(self):
-        from app.models.agent import Agent, MAX_MEMORY_ENTRY_CHARS
+        from stella_core.models.agent import Agent, MAX_MEMORY_ENTRY_CHARS
 
         built = Agent._construct_memory_string(["x" * 50_000])
 
@@ -34,7 +34,7 @@ class TestPromptCaps:
         assert "truncated" in built
 
     def test_chat_history_is_capped(self):
-        from app.models.agent import Agent, MAX_CHAT_HISTORY_MESSAGES
+        from stella_core.models.agent import Agent, MAX_CHAT_HISTORY_MESSAGES
 
         built = Agent._construct_chat_string(make_chat([f"m{i}" for i in range(50)]))
 
@@ -42,7 +42,7 @@ class TestPromptCaps:
         assert "m49" in built
 
     def test_short_input_is_left_alone(self):
-        from app.models.agent import Agent
+        from stella_core.models.agent import Agent
 
         assert Agent._construct_memory_string([]) == ""
         built = Agent._construct_memory_string(["just one"])
@@ -106,14 +106,14 @@ class TestActionParsing:
     def test_an_index_is_pulled_out_of_a_wordy_reply(self):
         """The text protocol is the fallback when a model has no tool support, and models
         answer it with "1.", "Action 1" or a whole sentence."""
-        from app.models.agent import Agent
+        from stella_core.models.agent import Agent
 
         action_map = {"1": _agent(), "2": _agent()}
         for reply in ("1", "1.", "Action 1", "I would pick action 1 here"):
             assert Agent._parse_action(reply, action_map) == "1"
 
     def test_an_unusable_reply_becomes_done(self):
-        from app.models.agent import Agent
+        from stella_core.models.agent import Agent
 
         action_map = {"1": _agent()}
         for reply in (None, "", "no idea", "7"):
