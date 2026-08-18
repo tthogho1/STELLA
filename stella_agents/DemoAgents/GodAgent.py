@@ -1,9 +1,9 @@
 import requests
 
-from app.models.agent import Agent
-from app.models.chat import Chat
-from app.openai_client import OpenAIClient
-from app.utils.request_builder import RequestBuilder
+from stella_core.models.agent import Agent
+from stella_core.models.chat import Chat
+from stella_core.openai_client import OpenAIClient
+from stella_core.utils.request_builder import RequestBuilder
 
 
 class GodAgent(Agent):

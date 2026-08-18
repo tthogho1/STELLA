@@ -8,13 +8,13 @@ parent forever -- and takes a successful sibling's result down with it.
 import threading
 import types
 
-from app.events import CollectingSink
+from stella_core.events import CollectingSink
 
 
 def _worker(db, events=None):
     """A Worker with its queue and pool stubbed out."""
-    from app.task_manager import Worker
-    import app.task_manager
+    from stella_core.task_manager import Worker
+    import stella_core.task_manager
 
     worker = Worker.__new__(Worker)
     # Worker subclasses Thread, and Thread.name refuses to be set before __init__ runs.
@@ -25,7 +25,7 @@ def _worker(db, events=None):
         add_task=queued.append,
     )
     worker.queued = queued
-    app.task_manager.db = db
+    stella_core.task_manager.db = db
     return worker
 
 

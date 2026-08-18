@@ -1,16 +1,24 @@
 import os
 
+from dotenv import load_dotenv
+
+# Loaded before importing stella_core: several of its modules read configuration from
+# the environment at import time, and stella_core never loads a .env file itself -- that
+# is the host application's job (see stella_core/__init__.py).
+load_dotenv()
+
 from flask import Flask
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
-from dotenv import load_dotenv
 
-from app.agent_storage import AgentStorage
-from app.events import SocketIOSink
+import stella_agents
+from stella_core.agent_storage import AgentStorage
+from stella_core.events import SocketIOSink
+from stella_core.chat_queue import ChatQueue
+from stella_core.db import init_database
+from stella_core.models.task import configure_default_agents
 from app.config import flask_configs
-
-from app.chat_queue import ChatQueue
 
 from app.views.auth import auth_views
 from app.views.chat import initiate_chat_views
@@ -19,8 +27,14 @@ from app.views.agent import agent_views
 from app.views.utils import utils_views
 from app.views.user import user_views
 
-# Load the environment variables from the .env file
-load_dotenv()
+# The agent content that ships with STELLA's reference server. Resolved through the
+# stella_agents package rather than a path relative to this file, since -- unlike
+# DOWNLOADED_AGENTS_DIR below -- it does not have to live next to app/ on disk.
+STELLA_AGENTS_DIR = os.path.dirname(os.path.abspath(stella_agents.__file__))
+# Where GET /agent/download (app/views/agent.py) installs community packages at runtime.
+# Kept as a second, separate scan directory rather than mixed into stella_agents/, so
+# runtime-installed content never overwrites anything this repo ships.
+DOWNLOADED_AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agents')
 
 
 def create_app(host, port):
@@ -30,6 +44,19 @@ def create_app(host, port):
     :return:
     """
     config_name = os.getenv('FLASK_CONFIG', 'default')
+
+    # Picks the backend from DATABASE (see stella_core/db/__init__.py). Explicit and
+    # first, since the views imported above already hold a `db` reference that only
+    # becomes usable once this has run.
+    init_database()
+
+    # stella_core has no built-in notion of a coordinator or welcome agent -- these are
+    # STELLA's own defaults, from stella_agents/StellaAgents/ (see
+    # stella_core/models/task.py:configure_default_agents).
+    configure_default_agents(
+        general_agent_id='stella_coordinator_agent',
+        empty_workspace_agent_id='stella_welcome_agent',
+    )
 
     socketio = SocketIO(ping_timeout=900, ping_interval=60)
     app = Flask(__name__)
@@ -46,7 +73,7 @@ def create_app(host, port):
 
     app.config.from_object(flask_configs[config_name])
     app.extensions['socketio'] = socketio
-    app.extensions['agent_storage'] = AgentStorage()
+    app.extensions['agent_storage'] = AgentStorage(agent_dirs=[STELLA_AGENTS_DIR, DOWNLOADED_AGENTS_DIR])
     # The runtime is handed an EventSink rather than the SocketIO instance itself, so the
     # task loop can also be driven without a web server (see app/events.py).
     app.extensions['event_sink'] = SocketIOSink(socketio)

@@ -87,7 +87,7 @@ def test_migrates_a_database_created_before_the_new_columns(tmp_path):
     legacy.commit()
     legacy.close()
 
-    import app.db.databases.sqlite as sqlite_module
+    import stella_core.db.databases.sqlite as sqlite_module
     original = sqlite_module.SQLITE_DB_PATH
     sqlite_module.SQLITE_DB_PATH = str(path)
     try:

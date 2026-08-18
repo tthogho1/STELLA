@@ -1,4 +1,4 @@
-from app.models.agent import Agent
+from stella_core.models.agent import Agent
 
 
 class StellaCoordinatorAgent(Agent):

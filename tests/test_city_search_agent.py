@@ -16,7 +16,7 @@ pytest.importorskip("langchain_core", reason="the wrapper needs langchain-core")
 
 @pytest.fixture
 def agent():
-    from app.agents.CustomAgents.CitySearchAgent import CitySearchAgent
+    from stella_agents.CustomAgents.CitySearchAgent import CitySearchAgent
     return CitySearchAgent()
 
 
@@ -47,7 +47,7 @@ def test_a_successful_search_is_summarised(agent, monkeypatch):
         "summary": "Osaka is a lively port city known for its food.",
     }
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(lambda _: json.dumps(payload))})(),
     )
 
@@ -63,7 +63,7 @@ def test_a_tool_level_error_is_reported_not_swallowed(agent, monkeypatch):
     """Missing credentials come back as an "error" field, not an exception."""
     payload = {"query": "Osaka", "error": "missing env var(s): DATABRICKS_TOKEN", "results": []}
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(lambda _: json.dumps(payload))})(),
     )
 
@@ -76,7 +76,7 @@ def test_a_tool_level_error_is_reported_not_swallowed(agent, monkeypatch):
 def test_no_results_tells_the_coordinator_to_stop(agent, monkeypatch):
     payload = {"query": "atlantis", "count": 0, "results": [], "summary": ""}
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(lambda _: json.dumps(payload))})(),
     )
 
@@ -92,7 +92,7 @@ def test_an_exception_inside_langchain_does_not_escape(agent, monkeypatch):
         raise RuntimeError("langchain blew up")
 
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(boom)})(),
     )
 
@@ -104,7 +104,7 @@ def test_an_exception_inside_langchain_does_not_escape(agent, monkeypatch):
 def test_an_empty_query_never_reaches_the_tool(agent, monkeypatch):
     called = []
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(lambda q: called.append(q) or "{}")})(),
     )
 
@@ -116,7 +116,7 @@ def test_an_empty_query_never_reaches_the_tool(agent, monkeypatch):
 
 def test_malformed_tool_output_is_survived(agent, monkeypatch):
     monkeypatch.setattr(
-        "app.agents.CustomAgents.CitySearchAgent.search_cities",
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
         type("T", (), {"invoke": staticmethod(lambda _: "not json at all")})(),
     )
 
@@ -127,7 +127,7 @@ def test_malformed_tool_output_is_survived(agent, monkeypatch):
 
 def test_the_tool_itself_reports_missing_credentials(monkeypatch):
     """Guards the contract the wrapper relies on: the tool returns, never raises."""
-    from app.tools.city_search import search_cities
+    from stella_agents.tools.city_search import search_cities
 
     monkeypatch.delenv("WORKSPACE_URL", raising=False)
     monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)

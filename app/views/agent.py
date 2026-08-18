@@ -19,6 +19,12 @@ webhook_secret = os.environ.get("WEBHOOK_SECRET")
 
 agent_views = Blueprint('agent_views', __name__)
 
+# Must match DOWNLOADED_AGENTS_DIR in app/server.py: that is the directory AgentStorage
+# actually scans for runtime-installed packages, so extracting anywhere else would leave
+# a downloaded agent invisible until someone noticed and moved it by hand.
+DOWNLOADED_AGENTS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'agents'))
+
 
 @agent_views.route('/agent/download', methods=['GET'])
 @jwt_required()
@@ -52,7 +58,7 @@ def download_package():
         for file in z.namelist():
             if "__MACOSX/" in file:
                 continue
-            z.extract(file, path="agents")
+            z.extract(file, path=DOWNLOADED_AGENTS_DIR)
 
         return f"Successfully installed {package_name}:{downloaded_version}", response.status_code
     elif response.status_code == 404:

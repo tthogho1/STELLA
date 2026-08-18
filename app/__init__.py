@@ -1,9 +1,11 @@
 """
 STELLA.
 
-Deliberately empty. Everything under app.* is imported through this module, so anything
-placed here is loaded even by code that only wants the agent runtime -- create_app used
-to live here, which meant `import app.models.task` pulled in Flask, SocketIO and every
-view. The web server is app.server; the runtime (Task, Agent, AgentStorage,
-OpenAIClient) has no web dependency and can be driven on its own.
+Deliberately empty. The agent runtime (Task, Agent, AgentStorage, EventSink, ChatQueue,
+TaskManager, the db layer, OpenAIClient) lives in stella_core and has no web dependency;
+app is STELLA's reference Flask server built on top of it, plus the built-in, demo and
+custom agents that ship with it. app.models, app.db, app.agent_storage, app.chat_queue,
+app.task_manager, app.openai_client, app.utils and app.events are now thin re-exports of
+the same objects from stella_core, kept so existing agents and integrations that import
+from app.* keep working unchanged.
 """

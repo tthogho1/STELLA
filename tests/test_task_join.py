@@ -50,7 +50,7 @@ class TestResultOrdering:
     def test_results_follow_delegation_order_not_completion_order(self, db, make_task):
         """Children write into the slot they were delegated in, so a child that finishes
         first cannot push an earlier sibling's result behind its own."""
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         for completion_order in ([0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]):
             task_id = make_task(memories=["seed"], pending_children=4)
@@ -76,7 +76,7 @@ class TestResultOrdering:
         assert collected == [f"r{i}" for i in range(30)]
 
     def test_random_completion_orders(self, db, make_task):
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         for _ in range(10):
             order = list(range(4))
@@ -90,7 +90,7 @@ class TestResultOrdering:
 
     def test_a_child_that_gave_up_leaves_a_gap(self, db, make_task):
         """A subtask stopped by the depth limit never stores anything."""
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         task_id = make_task()
         db.store_child_result(task_id, 0, ["first"])
@@ -101,7 +101,7 @@ class TestResultOrdering:
         assert parent.memories == ["first", "third"]
 
     def test_collecting_twice_does_not_duplicate(self, db, make_task):
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         task_id = make_task()
         db.store_child_result(task_id, 0, ["only"])
@@ -125,7 +125,7 @@ class TestMemoryInheritance:
         """A child is created holding the parent's memories as context. Forwarding those
         back doubles the parent's memories every round, which grew the prompt
         exponentially until it overflowed the context window."""
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         parent_id = make_task(memories=["A", "B"], pending_children=1)
         child_id = make_task(memories=["A", "B"], parent_task_id=parent_id,
@@ -142,7 +142,7 @@ class TestMemoryInheritance:
 
     def test_forwarding_stays_linear_over_several_rounds(self, db, make_task):
         """The failure this guards against only shows up once it compounds."""
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         parent_id = make_task()
         for round_number in range(6):
@@ -159,7 +159,7 @@ class TestMemoryInheritance:
             f"expected one entry per round, got {len(final)}"
 
     def test_forward_last_memory_sends_one_entry(self, db, make_task):
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         parent_id = make_task(memories=["A"])
         child_id = make_task(memories=["A"], parent_task_id=parent_id,
@@ -174,7 +174,7 @@ class TestMemoryInheritance:
         assert parent.memories == ["A", "C"]
 
     def test_an_agent_with_no_forwarding_flags_sends_nothing(self, db, make_task):
-        from app.models.task import Task
+        from stella_core.models.task import Task
 
         parent_id = make_task()
         child_id = make_task(parent_task_id=parent_id, child_index=0)

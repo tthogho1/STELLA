@@ -6,8 +6,8 @@ loop could not run without a web server. It now takes an EventSink.
 """
 import json
 
-from app.events import (CollectingSink, EventSink, NullSink, SocketIOSink,
-                        INFORMATION_EVENT, MESSAGE_EVENT)
+from stella_core.events import (CollectingSink, EventSink, NullSink, SocketIOSink,
+                                INFORMATION_EVENT, MESSAGE_EVENT)
 
 
 class _Recorder:
@@ -20,15 +20,18 @@ class _Recorder:
 
 def test_the_runtime_does_not_import_a_web_framework():
     """The whole point of the seam: importing the runtime must not pull in Flask."""
+    import os
     import subprocess
     import sys
 
     check = (
-        "import app.models.task, app.task_manager, app.chat_queue, app.events, sys;"
+        "import stella_core.models.task, stella_core.task_manager, stella_core.chat_queue, "
+        "stella_core.events, sys;"
         "print(','.join(m for m in ('flask','flask_socketio','werkzeug') if m in sys.modules))"
     )
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True,
-                         cwd="/Users/tthogho1/Documents/source/STELLA")
+                         cwd=repo_root)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "", f"runtime pulled in {out.stdout.strip()}"
 

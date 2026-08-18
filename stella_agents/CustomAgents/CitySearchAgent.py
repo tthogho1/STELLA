@@ -2,16 +2,17 @@
 Exposes the LangChain `search_cities` tool as a STELLA agent.
 
 STELLA has no notion of a LangChain registry: AgentStorage only instantiates Agent
-subclasses found under app/agents/, so a tool is reached by wrapping it. The tool itself
-is untouched in app/tools/city_search.py and can still be used from LangChain.
+subclasses found under the directories it is given, so a tool is reached by wrapping it.
+The tool itself is untouched in stella_agents/tools/city_search.py and can still be used
+from LangChain directly.
 """
 import json
 
-from app.models.agent import Agent
-from app.models.chat import Chat
-from app.openai_client import OpenAIClient
-from app.utils.request_builder import RequestBuilder
-from app.tools.city_search import search_cities
+from stella_core.models.agent import Agent
+from stella_core.models.chat import Chat
+from stella_core.openai_client import OpenAIClient
+from stella_core.utils.request_builder import RequestBuilder
+from stella_agents.tools.city_search import search_cities
 
 
 class CitySearchAgent(Agent):
