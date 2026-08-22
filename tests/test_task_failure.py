@@ -92,3 +92,66 @@ def test_an_unloadable_task_still_unblocks_the_chat(db):
     worker = _worker(db)
     worker._handle_failure("does-not-exist")          # must not raise
     assert worker.queued == []
+
+
+class TestGiveUpIsReported:
+    """
+    A subtask stopped by a depth limit has to say so in the parent's memories.
+
+    Releasing the join slot alone is not enough: the parent sees an empty result, reads it
+    as "still nothing on this" and delegates again. Once a limit is reached every retry is
+    refused on arrival, so the request spins until the overall depth cap ends it with no
+    answer -- which is what a real coffee-search request did, ten calls and nothing back.
+    """
+
+    def _task(self, db, make_task, **kwargs):
+        from stella_core.models.task import Task
+        return Task.load(make_task(**kwargs))
+
+    def test_the_reason_lands_in_the_parents_memories(self, db, make_task):
+        from stella_core.events import CollectingSink
+
+        parent_id = make_task(pending_children=1)
+        child = self._task(db, make_task, parent_task_id=parent_id, child_index=0)
+
+        child._report_to_parent(chat=None, events=CollectingSink(),
+                                give_up_message="Reached the call limit for agent X (5/5).")
+
+        stored = db.get_task_data(parent_id)["pending_results"]
+        assert stored, "the parent got nothing back, so it will just delegate again"
+        text = " ".join(stored["0"])
+        assert "call limit" in text
+        assert "not call this agent again" in text
+
+    def test_it_goes_into_the_slot_it_was_delegated_in(self, db, make_task):
+        from stella_core.events import CollectingSink
+
+        parent_id = make_task(pending_children=2)
+        child = self._task(db, make_task, parent_task_id=parent_id, child_index=1)
+
+        child._report_to_parent(chat=None, events=CollectingSink(), give_up_message="stopped")
+
+        assert list(db.get_task_data(parent_id)["pending_results"]) == ["1"]
+
+    def test_the_slot_is_still_released(self, db, make_task):
+        """The original reason this path exists must keep working."""
+        from stella_core.events import CollectingSink
+
+        parent_id = make_task(pending_children=1)
+        child = self._task(db, make_task, parent_task_id=parent_id, child_index=0)
+
+        requeue = child._report_to_parent(chat=None, events=CollectingSink(),
+                                          give_up_message="stopped")
+
+        assert db.get_task_data(parent_id)["pending_children"] == 0
+        assert requeue == parent_id, "the last sibling has to wake the parent"
+
+    def test_a_normal_completion_stores_nothing_extra(self, db, make_task):
+        from stella_core.events import CollectingSink
+
+        parent_id = make_task(pending_children=1)
+        child = self._task(db, make_task, parent_task_id=parent_id, child_index=0)
+
+        child._report_to_parent(chat=None, events=CollectingSink())
+
+        assert db.get_task_data(parent_id)["pending_results"] == {}

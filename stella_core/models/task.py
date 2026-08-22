@@ -297,6 +297,23 @@ class Task:
             db.update_chat(chat)
             return None
 
+        if give_up_message:
+            # Releasing the slot is not enough. A parent that gets an empty result back
+            # reads it as "still nothing on this" and delegates again, and once a limit is
+            # reached every retry is refused on arrival, so it spins until the overall
+            # depth cap stops the request with no answer at all. Put the reason where the
+            # parent will actually read it -- its own memories -- and say not to retry.
+            slot = self.child_index if self.child_index is not None else 0
+            print(f"[TASK] -- Reporting the give-up reason into slot {slot} of parent task "
+                  f"{self.parent_task_id}")
+            try:
+                db.store_child_result(self.parent_task_id, slot, [
+                    f"{give_up_message} Do not call this agent again for this request; "
+                    f"answer with the information you already have."
+                ])
+            except Exception as e:
+                print(f"[TASK] !! Could not report the give-up reason: {e}")
+
         remaining = db.decrement_pending_children(self.parent_task_id)
         if remaining > 0:
             print(f"[TASK] -- Parent task {self.parent_task_id} still waiting on "
