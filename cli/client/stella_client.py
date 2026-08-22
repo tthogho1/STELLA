@@ -79,6 +79,19 @@ class StellaClient:
         self.waiting_for_response = False
         self.initial_message = None
 
+    @staticmethod
+    def access_error(status_code):
+        """
+        Turns a rejected request into something the user can act on.
+
+        401 and 403 need different remedies: 401 means the token is missing or expired,
+        403 means it is fine but this account does not own what was asked for -- which is
+        what a stale chat_id in session.json looks like after switching user.
+        """
+        if status_code == 403:
+            return "This account does not have access to that. Try /workspace list, or /login as another user."
+        return "You are not authenticated. Please login."
+
     def auth_headers(self):
         # Check if the user is logged in
         if self.session.access_token is None:
@@ -127,8 +140,8 @@ class StellaClient:
         response = requests.get(self.compose_url(f"workspace/{workspace_id}"), headers=self.auth_headers())
         if response.status_code == 500:
             print_error(f"Workspace with ID {workspace_id} not found.")
-        elif response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        elif response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print(response.text)
             print_error("Failed to connect to workspace ({}).".format(response.status_code))
@@ -154,8 +167,8 @@ class StellaClient:
 
         if response.status_code == 200:
             print_success(f"Successfully installed {package_name}:{version}")
-        elif response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        elif response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code == 404:
             print_info(f"Package not found: {package_name}:{version}")
         else:
@@ -167,8 +180,8 @@ class StellaClient:
             response = requests.get(self.compose_url(f"agent/reload"), headers=self.auth_headers())
             if response.status_code == 200:
                 print_success(f"Successfully reloaded agents.")
-            elif response.status_code == 401:
-                print_error(f"You are not authenticated. Please login.")
+            elif response.status_code in (401, 403):
+                print_error(self.access_error(response.status_code))
             else:
                 print_error(f"Failed to reload agents. ({response.text})")
         except Exception as e:
@@ -200,8 +213,8 @@ class StellaClient:
             headers=self.auth_headers(),
             json={"username": username}
         )
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error(f"Failed to change username. ({response.json()['msg']})")
         else:
@@ -213,8 +226,8 @@ class StellaClient:
             headers=self.auth_headers(),
             json={"password": password}
         )
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error(f"Failed to change password. ({response.json()['msg']})")
         else:
@@ -226,8 +239,8 @@ class StellaClient:
         else:
             response = requests.post(self.compose_url("workspace"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
             return None
         elif response.status_code != 200:
             raise Exception(
@@ -243,8 +256,8 @@ class StellaClient:
         response = requests.put(self.compose_url(f"workspace/{self.session.workspace_id}/rename"), headers=self.auth_headers(),
                                 json={"name": name})
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
             return None
         elif response.status_code != 200:
             raise Exception(
@@ -256,8 +269,8 @@ class StellaClient:
     def get_all_workspaces(self):
         response = requests.get(self.compose_url("workspace"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
             return None
         elif response.status_code != 200:
             print_error("Failed to get workspaces. ({}).".format(response.status_code))
@@ -269,8 +282,8 @@ class StellaClient:
     def get_workspace_by_id(self, workspace_id=None):
         response = requests.get(self.compose_url(f"workspace/{workspace_id}"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             raise Exception("Failed to get workspace. ({}).".format(response.status_code))
         else:
@@ -280,8 +293,8 @@ class StellaClient:
     def delete_workspace(self, workspace_id):
         response = requests.delete(self.compose_url(f"workspace/{workspace_id}"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error("Failed to delete workspace. ({}).".format(response.status_code))
         else:
@@ -291,8 +304,8 @@ class StellaClient:
         response = requests.post(self.compose_url(f"workspace/{self.session.workspace_id}/agent"), headers=self.auth_headers(),
                                  json={"agent_id": agent_id})
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error(f"Failed to add agent. ({response.json()['msg']})")
         else:
@@ -302,8 +315,8 @@ class StellaClient:
         response = requests.delete(self.compose_url(f"workspace/{self.session.workspace_id}/agent"), headers=self.auth_headers(),
                                    json={"agent_id": agent_id})
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error("Failed to remove agent. ({}).".format(response.status_code))
         else:
@@ -313,8 +326,8 @@ class StellaClient:
         response = requests.put(self.compose_url(f"workspace/{self.session.workspace_id}/coordinator"), headers=self.auth_headers(),
                                 json={"agent_id": agent_id})
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             print_error("Failed to set coordinator agent. ({}).".format(response.status_code))
         else:
@@ -323,8 +336,8 @@ class StellaClient:
     def create_chat(self, workspace_id):
         response = requests.post(self.compose_url(f"chat?workspace_id={workspace_id}"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             raise Exception(
                 "Request to create a new chat failed with status code: {}, Message: {}".format(
@@ -381,8 +394,8 @@ class StellaClient:
     def get_connection_string(self, chat_id):
         response = requests.get(self.compose_url(f"chat/authorize?chat_id={chat_id}"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             raise Exception(
                 "Request to get a chat connection authorization string failed with status code: {}, Message: {}".format(
@@ -428,8 +441,8 @@ class StellaClient:
             headers=self.auth_headers()
         )
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
             self.spinner.stop()
             return
         elif response.status_code != 200:
@@ -464,8 +477,8 @@ class StellaClient:
             url += f"&task_id={task_id}"
 
         response = requests.get(self.compose_url(url), headers=self.auth_headers())
-        if response.status_code == 401:
-            print_error("You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
             return
         if response.status_code != 200:
             try:
@@ -479,8 +492,8 @@ class StellaClient:
     def get_user(self):
         response = requests.get(self.compose_url("user"), headers=self.auth_headers())
 
-        if response.status_code == 401:
-            print_error(f"You are not authenticated. Please login.")
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
         elif response.status_code != 200:
             raise Exception(
                 "Request to get a user failed with status code: {}, Message: {}".format(
