@@ -133,6 +133,51 @@ Until you do, the agent exists but nothing will call it. With no agents at all a
 workspace answers through `stella_welcome_agent`; add one and the coordinator takes over
 and can delegate to several agents at once.
 
+### Running Agents Without the Server
+
+`stella_core` imports no web framework, so a request can be run straight from Python --
+no Flask, no SocketIO, no HTTP. Build what the server would build, create a task, then
+keep calling `Task.execute()` with whatever it returns. The queue in `TaskManager` is a
+thread pool around exactly that loop.
+
+```bash
+cd app && python ../examples/run_without_a_server.py "What is the weather in Kyoto?"
+```
+
+```
+   [*] Asking WEATHER…
+   [*] WEATHER done
+   [*] Writing the answer…
+
+A: The current weather in Kyoto shows a temperature of 28.2°C ...
+
+stella_coordinator_agent 2.5s x2  — answered the user
+└─ demo_weather_agent 1.8s
+
+2 tasks, 3 agent runs, 4.306s wall clock
+```
+
+See [`examples/run_without_a_server.py`](examples/run_without_a_server.py). Run it from
+`app/`, for the same reason `stella serve` chdirs there: `.env` and the SQLite path are
+resolved against the working directory.
+
+Two things the server does that a library caller has to do itself, because neither
+happens as a side effect of an import any more:
+
+- `init_database()` — picks the backend from `DATABASE`
+- `configure_default_agents(...)` — the runtime has no built-in coordinator id
+
+Progress and answers go to an `EventSink` instead of SocketIO. `CollectingSink` keeps
+them in memory; see `stella_core/events.py`.
+
+### Seeing What a Request Did
+
+Only the final answer reaches the user, so `/trace` in the CLI (or
+`GET /chat/trace?chat_id=...`) reconstructs the run afterwards: which agents were
+delegated to, in what shape, how many times each ran, and where the time went. Siblings
+appear in the order they were delegated, and the total is wall clock rather than the sum
+of the spans, since parallel agents overlap.
+
 ### Repository Layout
 
 | Directory | Contents |
