@@ -83,6 +83,69 @@ To list available commands, write `/help` in the shell.
 
 For a complete guide, visit [Getting Started](https://docs.stellaframework.com/Getting_Started).
 
+> **Upgrading an existing checkout?** Run `pip install -e .` again after pulling. The
+> runtime and the agents were split into their own top-level packages, and an editable
+> install made before that will not see them:
+> `ModuleNotFoundError: No module named 'stella_agents'`.
+
+### Creating an Agent
+
+Registering an agent is two steps: STELLA has to **find** the class, and a workspace has
+to **use** it.
+
+**1. Drop a file into `stella_agents/`.** There is no registration list to edit —
+`AgentStorage` walks the directory at startup, imports every `.py` file and instantiates
+any `Agent` subclass it finds. A file that fails to import is skipped with a message
+rather than stopping the server.
+
+```python
+# stella_agents/CustomAgents/MyAgent.py
+from stella_core.models.agent import Agent
+
+
+class MyAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            agent_id='my_agent',                        # unique, this is what /add takes
+            name='MY_AGENT',                            # shown in progress updates
+            short_description='What this agent does',   # the coordinator picks from this
+            skip_action_selection=True,                 # a leaf: nothing to delegate to
+            forward_all_memory_entries_to_parent=True,  # hand the result back up
+        )
+
+    def respond(self, openai_client, request_builder, chat=None, memories=None):
+        return "the result, as a string"
+```
+
+Two rules: the class must subclass `Agent`, and it must be constructible with **no
+arguments**. Make `short_description` say what the agent can do — the coordinator reads
+only that when deciding whether to delegate to it.
+
+Pick up the new file with `stella serve` (restart) or `GET /agent/reload`.
+
+**2. Add it to a workspace** from the CLI:
+
+```
+/add my_agent
+```
+
+Until you do, the agent exists but nothing will call it. With no agents at all a
+workspace answers through `stella_welcome_agent`; add one and the coordinator takes over
+and can delegate to several agents at once.
+
+### Repository Layout
+
+| Directory | Contents |
+| --- | --- |
+| `stella_core/` | The agent runtime — `Task`, `Agent`, `AgentStorage`, the queues, the database layer, `OpenAIClient`, `EventSink`. Imports no web framework, so it can be driven without a server. |
+| `stella_agents/` | The agents that ship with STELLA, and where your own belong. |
+| `app/` | The reference Flask + SocketIO server that wires the runtime together, plus thin re-exports so older agents importing from `app.*` keep working. |
+| `cli/` | The client. Talks to the server over HTTP and SocketIO; it never imports the server. |
+
+`app/agents/` is separate from `stella_agents/`: it is where `GET /agent/download`
+installs community packages at runtime, kept apart so downloaded content never overwrites
+what the repository ships.
+
 ## Typical Use Cases:
 
 - Automating workflows and tasks.
