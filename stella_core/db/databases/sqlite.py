@@ -6,6 +6,7 @@ import threading
 from abc import ABC
 
 from stella_core.db.database_interface import DatabaseInterface
+from stella_core.db.errors import NotFound
 from stella_core.models.user import User
 from stella_core.models.workspace import Workspace
 from stella_core.models.chat import Chat, ChatConnectionString
@@ -190,7 +191,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT workspaces FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         workspaces = self._deserialize_list(row['workspaces'])
         return [self.get_workspace(workspace_id) for workspace_id in workspaces]
 
@@ -200,7 +201,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Workspace not found")
+            raise NotFound("Workspace not found")
         return Workspace(
             workspace_id=str(row['id']),
             name=row['name'],
@@ -229,7 +230,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         return User(
             user_id=str(row['id']),
             username=row['username'],
@@ -244,7 +245,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM user WHERE username = ?", (username,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         return User(
             user_id=str(row['id']),
             username=row['username'],
@@ -268,7 +269,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat WHERE id = ?", (chat_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Chat not found")
+            raise NotFound("Chat not found")
         return Chat(
             chat_id=str(chat_id),
             workspace_id=str(row['workspace_id']),
@@ -283,7 +284,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM task WHERE id = ?", (task_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         task_data = {
             "chat_id": str(row['chat_id']),
             "agents": self._deserialize_list(row['agents']),
@@ -381,7 +382,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Connection string not found")
+            raise NotFound("Connection string not found")
         return ChatConnectionString(
             chat_id=str(row['chat_id']),
             string=row['string'],
@@ -484,7 +485,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT pending_results FROM task WHERE id = ?", (task_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         results = json.loads(row['pending_results']) if row['pending_results'] else {}
         results[str(child_index)] = list(memories)
         cursor.execute("UPDATE task SET pending_results = ? WHERE id = ?",
@@ -501,7 +502,7 @@ class SQLite(DatabaseInterface, ABC):
         row = cursor.fetchone()
         self.conn.commit()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         return int(row['pending_children'] or 0)
 
     @_synchronized
@@ -550,7 +551,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Message string not found")
+            raise NotFound("Message string not found")
         return ChatConnectionString(
             chat_id=str(row['chat_id']),
             string=row['string'],

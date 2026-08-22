@@ -5,6 +5,7 @@ from bson import ObjectId
 from pymongo import ReturnDocument
 
 from stella_core.db.database_interface import DatabaseInterface
+from stella_core.db.errors import NotFound
 import pymongo
 
 from stella_core.models.user import User
@@ -77,7 +78,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"_id": ObjectId(user_id)})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         workspaces = []
         for workspace_id in user['workspaces']:
@@ -101,7 +102,7 @@ class MongoDB(DatabaseInterface, ABC):
         workspace = self.db.workspaces.find_one({"_id": ObjectId(workspace_id)})
 
         if workspace is None:
-            raise Exception("Workspace not found")
+            raise NotFound("Workspace not found")
 
         return Workspace(
             workspace_id=str(workspace['_id']),
@@ -139,7 +140,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"_id": ObjectId(user_id)})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         return User(
             user_id=str(user['_id']),
@@ -157,7 +158,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"username": username})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         return User(
             user_id=str(user['_id']),
@@ -185,7 +186,7 @@ class MongoDB(DatabaseInterface, ABC):
         chat = self.db.chats.find_one({"_id": ObjectId(chat_id)})
 
         if chat is None:
-            raise Exception("Chat not found")
+            raise NotFound("Chat not found")
 
         return Chat(
             chat_id=chat_id,
@@ -205,7 +206,7 @@ class MongoDB(DatabaseInterface, ABC):
 
         print(f"Getting task {task_id}")
         if task is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
         task_data = {
             "chat_id": task['chat_id'],
@@ -317,7 +318,7 @@ class MongoDB(DatabaseInterface, ABC):
         connection_string = self.db.chat_connection_strings.find_one({"string": string})
 
         if connection_string is None:
-            raise Exception("Connection string not found")
+            raise NotFound("Connection string not found")
 
         return ChatConnectionString(
             chat_id=connection_string['chat_id'],
@@ -372,7 +373,7 @@ class MongoDB(DatabaseInterface, ABC):
         message_string = self.db.chat_message_strings.find_one({"string": string})
 
         if message_string is None:
-            raise Exception("Message string not found")
+            raise NotFound("Message string not found")
 
         return ChatConnectionString(
             chat_id=message_string['chat_id'],
@@ -481,7 +482,7 @@ class MongoDB(DatabaseInterface, ABC):
             {"$set": {f"pending_results.{child_index}": list(memories)}}
         )
         if result.matched_count == 0:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
     def decrement_pending_children(self, task_id) -> int:
         """
@@ -495,7 +496,7 @@ class MongoDB(DatabaseInterface, ABC):
             return_document=ReturnDocument.AFTER
         )
         if task is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
         remaining = task.get('pending_children', 0) or 0
         if remaining < 0:
