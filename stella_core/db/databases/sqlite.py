@@ -6,6 +6,7 @@ import threading
 from abc import ABC
 
 from stella_core.db.database_interface import DatabaseInterface
+from stella_core.db.errors import NotFound
 from stella_core.models.user import User
 from stella_core.models.workspace import Workspace
 from stella_core.models.chat import Chat, ChatConnectionString
@@ -113,7 +114,8 @@ class SQLite(DatabaseInterface, ABC):
                 "pending_children" INTEGER DEFAULT 0,
                 "inherited_memory_count" INTEGER DEFAULT 0,
                 "child_index" INTEGER,
-                "pending_results" TEXT
+                "pending_results" TEXT,
+                "runs" TEXT
             )
         '''
 
@@ -145,6 +147,7 @@ class SQLite(DatabaseInterface, ABC):
                  'ALTER TABLE task ADD COLUMN inherited_memory_count INTEGER DEFAULT 0'),
                 ('child_index', 'ALTER TABLE task ADD COLUMN child_index INTEGER'),
                 ('pending_results', 'ALTER TABLE task ADD COLUMN pending_results TEXT'),
+                ('runs', 'ALTER TABLE task ADD COLUMN runs TEXT'),
         ):
             if column not in existing:
                 print(f"[SQLite] Adding missing column task.{column}")
@@ -188,7 +191,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT workspaces FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         workspaces = self._deserialize_list(row['workspaces'])
         return [self.get_workspace(workspace_id) for workspace_id in workspaces]
 
@@ -198,7 +201,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM workspace WHERE id = ?", (workspace_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Workspace not found")
+            raise NotFound("Workspace not found")
         return Workspace(
             workspace_id=str(row['id']),
             name=row['name'],
@@ -227,7 +230,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         return User(
             user_id=str(row['id']),
             username=row['username'],
@@ -242,7 +245,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM user WHERE username = ?", (username,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
         return User(
             user_id=str(row['id']),
             username=row['username'],
@@ -266,7 +269,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat WHERE id = ?", (chat_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Chat not found")
+            raise NotFound("Chat not found")
         return Chat(
             chat_id=str(chat_id),
             workspace_id=str(row['workspace_id']),
@@ -281,7 +284,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM task WHERE id = ?", (task_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         task_data = {
             "chat_id": str(row['chat_id']),
             "agents": self._deserialize_list(row['agents']),
@@ -301,7 +304,8 @@ class SQLite(DatabaseInterface, ABC):
             "pending_children": row['pending_children'] or 0,
             "inherited_memory_count": row['inherited_memory_count'] or 0,
             "child_index": row['child_index'],
-            "pending_results": json.loads(row['pending_results']) if row['pending_results'] else {}
+            "pending_results": json.loads(row['pending_results']) if row['pending_results'] else {},
+            "runs": json.loads(row['runs']) if row['runs'] else []
         }
         return task_data
 
@@ -310,11 +314,11 @@ class SQLite(DatabaseInterface, ABC):
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                     pending_children=0, inherited_memory_count=0, child_index=None,
-                    pending_results=None):
+                    pending_results=None, runs=None):
         cursor = self.conn.cursor()
 
         cursor.execute(
-            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children, inherited_memory_count, child_index, pending_results) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children, inherited_memory_count, child_index, pending_results, runs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chat_id, json.dumps(agents), owner, coordinator_agent, current_agent, json.dumps(memories), parent_task_id,
              top_level_task_id, int(completed), created_at, json.dumps(depths), int(is_top_level),
              top_level_task_max_depth,
@@ -322,7 +326,8 @@ class SQLite(DatabaseInterface, ABC):
              int(pending_children),
              int(inherited_memory_count),
              child_index,
-             json.dumps(pending_results or {}))
+             json.dumps(pending_results or {}),
+             json.dumps(runs or []))
         )
 
         task_id = cursor.lastrowid
@@ -346,7 +351,8 @@ class SQLite(DatabaseInterface, ABC):
             "pending_children": pending_children,
             "inherited_memory_count": inherited_memory_count,
             "child_index": child_index,
-            "pending_results": pending_results or {}
+            "pending_results": pending_results or {},
+            "runs": runs or []
         }
 
         print(f"CREATING TASK:")
@@ -376,7 +382,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Connection string not found")
+            raise NotFound("Connection string not found")
         return ChatConnectionString(
             chat_id=str(row['chat_id']),
             string=row['string'],
@@ -431,7 +437,7 @@ class SQLite(DatabaseInterface, ABC):
         print(f"UPDATING TASK")
         print(json.dumps(task_data))
         cursor.execute(
-            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ?, inherited_memory_count = ?, child_index = ?, pending_results = ? WHERE id = ?",
+            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ?, inherited_memory_count = ?, child_index = ?, pending_results = ?, runs = ? WHERE id = ?",
             (
                 task_data['chat_id'],
                 json.dumps(task_data['agents']),
@@ -451,10 +457,25 @@ class SQLite(DatabaseInterface, ABC):
                 int(task_data.get('inherited_memory_count', 0) or 0),
                 task_data.get('child_index', None),
                 json.dumps(task_data.get('pending_results', {}) or {}),
+                json.dumps(task_data.get('runs', []) or []),
                 task_data.get('task_id', None)
             ))
         self.conn.commit()
         return task_data
+
+    @_synchronized
+    def get_top_level_task_ids(self, chat_id) -> list:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM task WHERE chat_id = ? AND is_top_level = 1 ORDER BY id",
+                       (chat_id,))
+        return [str(row['id']) for row in cursor.fetchall()]
+
+    @_synchronized
+    def get_tasks_for_top_level(self, top_level_task_id) -> list:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM task WHERE top_level_task_id = ? ORDER BY id",
+                       (top_level_task_id,))
+        return [self.get_task_data(str(row['id'])) for row in cursor.fetchall()]
 
     @_synchronized
     def store_child_result(self, task_id, child_index, memories) -> None:
@@ -464,7 +485,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT pending_results FROM task WHERE id = ?", (task_id,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         results = json.loads(row['pending_results']) if row['pending_results'] else {}
         results[str(child_index)] = list(memories)
         cursor.execute("UPDATE task SET pending_results = ? WHERE id = ?",
@@ -481,7 +502,7 @@ class SQLite(DatabaseInterface, ABC):
         row = cursor.fetchone()
         self.conn.commit()
         if row is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
         return int(row['pending_children'] or 0)
 
     @_synchronized
@@ -530,7 +551,7 @@ class SQLite(DatabaseInterface, ABC):
         cursor.execute("SELECT * FROM chat_connection_string WHERE string = ?", (string,))
         row = cursor.fetchone()
         if row is None:
-            raise Exception("Message string not found")
+            raise NotFound("Message string not found")
         return ChatConnectionString(
             chat_id=str(row['chat_id']),
             string=row['string'],

@@ -106,7 +106,7 @@ class DatabaseInterface(ABC):
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                     pending_children=0, inherited_memory_count=0, child_index=None,
-                    pending_results=None):
+                    pending_results=None, runs=None):
         pass
 
     @abstractmethod
@@ -119,6 +119,30 @@ class DatabaseInterface(ABC):
 
     @abstractmethod
     def delete_task(self, task_id) -> None:
+        pass
+
+    @abstractmethod
+    def get_top_level_task_ids(self, chat_id) -> list:
+        """
+        The top level task of each request made in a chat, oldest first.
+
+        One chat produces one of these per user message; a trace is scoped to one of them.
+        :param chat_id: The chat to look in
+        :return: Task ids as strings
+        """
+        pass
+
+    @abstractmethod
+    def get_tasks_for_top_level(self, top_level_task_id) -> list:
+        """
+        Every task belonging to one request, including the top level task itself.
+
+        The shape of a run is only recoverable after the fact: tasks are created as the
+        tree is walked and nothing holds a list of them, so a trace has to read them back
+        by their shared top_level_task_id.
+        :param top_level_task_id: The id of the request's top level task
+        :return: Task dicts, in creation order
+        """
         pass
 
     @abstractmethod

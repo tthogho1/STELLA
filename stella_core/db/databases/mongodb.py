@@ -5,6 +5,7 @@ from bson import ObjectId
 from pymongo import ReturnDocument
 
 from stella_core.db.database_interface import DatabaseInterface
+from stella_core.db.errors import NotFound
 import pymongo
 
 from stella_core.models.user import User
@@ -77,7 +78,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"_id": ObjectId(user_id)})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         workspaces = []
         for workspace_id in user['workspaces']:
@@ -101,7 +102,7 @@ class MongoDB(DatabaseInterface, ABC):
         workspace = self.db.workspaces.find_one({"_id": ObjectId(workspace_id)})
 
         if workspace is None:
-            raise Exception("Workspace not found")
+            raise NotFound("Workspace not found")
 
         return Workspace(
             workspace_id=str(workspace['_id']),
@@ -139,7 +140,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"_id": ObjectId(user_id)})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         return User(
             user_id=str(user['_id']),
@@ -157,7 +158,7 @@ class MongoDB(DatabaseInterface, ABC):
         """
         user = self.db.users.find_one({"username": username})
         if user is None:
-            raise Exception("User not found")
+            raise NotFound("User not found")
 
         return User(
             user_id=str(user['_id']),
@@ -185,7 +186,7 @@ class MongoDB(DatabaseInterface, ABC):
         chat = self.db.chats.find_one({"_id": ObjectId(chat_id)})
 
         if chat is None:
-            raise Exception("Chat not found")
+            raise NotFound("Chat not found")
 
         return Chat(
             chat_id=chat_id,
@@ -205,7 +206,7 @@ class MongoDB(DatabaseInterface, ABC):
 
         print(f"Getting task {task_id}")
         if task is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
         task_data = {
             "chat_id": task['chat_id'],
@@ -226,7 +227,8 @@ class MongoDB(DatabaseInterface, ABC):
             "pending_children": task.get('pending_children', 0) or 0,
             "inherited_memory_count": task.get('inherited_memory_count', 0) or 0,
             "child_index": task.get('child_index', None),
-            "pending_results": task.get('pending_results', {}) or {}
+            "pending_results": task.get('pending_results', {}) or {},
+            "runs": task.get('runs', []) or []
         }
 
         return task_data
@@ -235,7 +237,7 @@ class MongoDB(DatabaseInterface, ABC):
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                     pending_children=0, inherited_memory_count=0, child_index=None,
-                    pending_results=None):
+                    pending_results=None, runs=None):
         """
         Creates a new task in the database.
         :param chat_id: The id of the original chat where the message was sent by the user to Stella
@@ -273,7 +275,8 @@ class MongoDB(DatabaseInterface, ABC):
             "pending_children": pending_children,
             "inherited_memory_count": inherited_memory_count,
             "child_index": child_index,
-            "pending_results": pending_results or {}
+            "pending_results": pending_results or {},
+            "runs": runs or []
         }
         task_id = str(self.db.tasks.insert_one(task_data).inserted_id)
         task_data['task_id'] = str(task_id)
@@ -315,7 +318,7 @@ class MongoDB(DatabaseInterface, ABC):
         connection_string = self.db.chat_connection_strings.find_one({"string": string})
 
         if connection_string is None:
-            raise Exception("Connection string not found")
+            raise NotFound("Connection string not found")
 
         return ChatConnectionString(
             chat_id=connection_string['chat_id'],
@@ -370,7 +373,7 @@ class MongoDB(DatabaseInterface, ABC):
         message_string = self.db.chat_message_strings.find_one({"string": string})
 
         if message_string is None:
-            raise Exception("Message string not found")
+            raise NotFound("Message string not found")
 
         return ChatConnectionString(
             chat_id=message_string['chat_id'],
@@ -454,6 +457,16 @@ class MongoDB(DatabaseInterface, ABC):
         self.db.tasks.update_one({"_id": ObjectId(task_data['task_id'])}, {"$set": task_data})
         return task_data
 
+    def get_top_level_task_ids(self, chat_id) -> list:
+        """The top level task of each request made in a chat, oldest first."""
+        return [str(t['_id']) for t in
+                self.db.tasks.find({"chat_id": chat_id, "is_top_level": True}).sort("_id", 1)]
+
+    def get_tasks_for_top_level(self, top_level_task_id) -> list:
+        """Every task belonging to one request, in creation order."""
+        return [self.get_task_data(str(t['_id']))
+                for t in self.db.tasks.find({"top_level_task_id": top_level_task_id}).sort("_id", 1)]
+
     def store_child_result(self, task_id, child_index, memories) -> None:
         """
         Records one child's results in its own slot on the parent.
@@ -469,7 +482,7 @@ class MongoDB(DatabaseInterface, ABC):
             {"$set": {f"pending_results.{child_index}": list(memories)}}
         )
         if result.matched_count == 0:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
     def decrement_pending_children(self, task_id) -> int:
         """
@@ -483,7 +496,7 @@ class MongoDB(DatabaseInterface, ABC):
             return_document=ReturnDocument.AFTER
         )
         if task is None:
-            raise Exception("Task not found")
+            raise NotFound("Task not found")
 
         remaining = task.get('pending_children', 0) or 0
         if remaining < 0:

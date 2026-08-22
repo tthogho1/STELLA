@@ -10,6 +10,8 @@ from flask_socketio import join_room, leave_room
 
 from app.db import db
 from app.models.chat import Chat
+from app.utils.view_helpers import get_owned_or_404
+from stella_core.trace import build_trace, render_trace
 
 
 def initiate_chat_views(socketio, chat_queue):
@@ -27,14 +29,10 @@ def initiate_chat_views(socketio, chat_queue):
         # Get chat id from url param
         chat_id = request.args.get('chat_id')
 
-        try:
-            chat = db.get_chat_by_id(chat_id)
-        except Exception as e:
-            return jsonify({"msg": str(e)}), 404
-
-        # Check if user is the owner of the chat
-        if chat.owner != user_id:
-            return jsonify({"msg": "User is not the owner of the chat"}), 401
+        chat, err = get_owned_or_404(db.get_chat_by_id, chat_id, user_id,
+                                      not_owner_msg="User is not the owner of the chat")
+        if err:
+            return err
 
         connection_string = db.create_chat_connection_string(
             chat_id=chat_id,
@@ -56,15 +54,10 @@ def initiate_chat_views(socketio, chat_queue):
         user_id = get_jwt_identity()
         chat_id = request.args.get('chat_id')
 
-        # Check if chat exists
-        try:
-            chat = db.get_chat_by_id(chat_id)
-        except Exception as e:
-            return jsonify({"msg": str(e)}), 404
-
-        # Check if user is the owner of the chat
-        if chat.owner != user_id:
-            return jsonify({"msg": "User is not the owner of the chat"}), 401
+        chat, err = get_owned_or_404(db.get_chat_by_id, chat_id, user_id,
+                                      not_owner_msg="User is not the owner of the chat")
+        if err:
+            return err
 
         message_string = db.create_chat_message_string(
             chat_id=chat_id,
@@ -85,16 +78,10 @@ def initiate_chat_views(socketio, chat_queue):
         if not workspace_id:
             return jsonify({"msg": "Missing workspace id"}), 400
 
-        # Check if workspace exists
-        try:
-            workspace = db.get_workspace(workspace_id)
-        except Exception as e:
-            return jsonify({"msg": str(e)}), 404
-
-        # Check if user is the owner of the workspace
-        if workspace.owner != user_id:
-            print(workspace.owner, user_id)
-            return jsonify({"msg": "User is not the owner of the workspace"}), 401
+        workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                           not_owner_msg="User is not the owner of the workspace")
+        if err:
+            return err
 
         # Create chat
         chat = db.create_chat(
@@ -112,17 +99,46 @@ def initiate_chat_views(socketio, chat_queue):
         # Get chat id from url param
         chat_id = request.args.get('chat_id')
 
-        # Check if chat exists
-        try:
-            chat = db.get_chat_by_id(chat_id)
-        except Exception as e:
-            return jsonify({"msg": str(e)}), 404
-
-        # Check if user is the owner of the chat
-        if chat.owner != chat_id:
-            return jsonify({"msg": "User is not the owner of the chat"}), 401
+        chat, err = get_owned_or_404(db.get_chat_by_id, chat_id, user_id,
+                                      not_owner_msg="User is not the owner of the chat")
+        if err:
+            return err
 
         return jsonify(chat.to_dict()), 200
+
+    @chat_views.route('/chat/trace', methods=['GET'])
+    @jwt_required()
+    def get_chat_trace():
+        """
+        The execution trace of a request: which agents ran, in what shape, for how long.
+
+        Defaults to the most recent request in the chat, which is the one someone is
+        usually asking about. Pass task_id to look at an earlier one.
+        """
+        user_id = get_jwt_identity()
+        chat_id = request.args.get('chat_id')
+        if not chat_id:
+            return jsonify({"msg": "Missing chat id"}), 400
+
+        chat, err = get_owned_or_404(db.get_chat_by_id, chat_id, user_id,
+                                      not_owner_msg="User is not the owner of the chat")
+        if err:
+            return err
+
+        task_id = request.args.get('task_id')
+        if not task_id:
+            task_ids = db.get_top_level_task_ids(chat_id)
+            if not task_ids:
+                return jsonify({"msg": "This chat has not run anything yet"}), 404
+            task_id = task_ids[-1]
+
+        trace = build_trace(task_id)
+        if trace is None:
+            return jsonify({"msg": "No trace for that task"}), 404
+
+        return jsonify({"task_id": task_id,
+                        "trace": trace,
+                        "rendered": render_trace(trace)}), 200
 
     @chat_views.route('/chat', methods=['DELETE'])
     @jwt_required()
@@ -132,15 +148,10 @@ def initiate_chat_views(socketio, chat_queue):
         # Get chat id from url param
         chat_id = request.args.get('chat_id')
 
-        # Check if chat exists
-        try:
-            chat = db.get_chat_by_id(chat_id)
-        except Exception as e:
-            return jsonify({"msg": str(e)}), 404
-
-        # Check if user is the owner of the chat
-        if chat.owner != identity:
-            return jsonify({"msg": "User is not the owner of the chat"}), 401
+        chat, err = get_owned_or_404(db.get_chat_by_id, chat_id, identity,
+                                      not_owner_msg="User is not the owner of the chat")
+        if err:
+            return err
 
         # Delete chat
         try:

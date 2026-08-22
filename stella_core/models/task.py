@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 from stella_core.db import db
 from stella_core.models.chat import Chat
@@ -40,7 +41,7 @@ class Task:
                  parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                  is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                  pending_children=0, inherited_memory_count=0, child_index=None,
-                 pending_results=None):
+                 pending_results=None, runs=None):
         """
         Creates a new task in the database.
         :param task_id: The id of the task
@@ -86,6 +87,10 @@ class Task:
         self.child_index = child_index
         # Results handed up by children, keyed by their child_index.
         self.pending_results = pending_results if pending_results is not None else {}
+        # One entry per execution of this task, for the trace. A task runs again every
+        # time its children report back, so this is a list, not a single timestamp.
+        self.runs = runs if runs is not None else []
+        self._run_note = None
 
     @classmethod
     def create_top_level_task(cls, chat: Chat):
@@ -152,6 +157,7 @@ class Task:
             inherited_memory_count=task_data.get('inherited_memory_count', 0),
             child_index=task_data.get('child_index', None),
             pending_results=task_data.get('pending_results', {}),
+            runs=task_data.get('runs', []),
         )
 
     @classmethod
@@ -177,6 +183,7 @@ class Task:
             inherited_memory_count=task_data.get('inherited_memory_count', 0),
             child_index=task_data.get('child_index', None),
             pending_results=task_data.get('pending_results', {}),
+            runs=task_data.get('runs', []),
         )
 
     def check_max_depth_reached(self, selected_agent, top_level_task):
@@ -326,6 +333,43 @@ class Task:
     def execute(self, agent_storage: AgentStorage, openai_client: OpenAIClient, events,
                 request_builder: RequestBuilder):
         """
+        Runs the task and records how long it took.
+
+        A task runs more than once -- a parent is re-queued every time its children report
+        back -- so what a trace needs is one span per run, not one per task. The timing
+        wraps _execute() rather than being written at each `return`: there are four exits
+        already and the two bugs this tree has had both came from a new exit forgetting to
+        do its bookkeeping.
+        """
+        self._run_note = None
+        started = time.time()
+        error = None
+        try:
+            return self._execute(agent_storage, openai_client, events, request_builder)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            self._record_run(started, time.time(), error)
+
+    def _record_run(self, started, ended, error=None):
+        """Appends one span to this task's history. Never let tracing break the task."""
+        try:
+            self.runs.append({
+                "agent": self.current_agent,
+                "started": started,
+                "ended": ended,
+                "seconds": round(ended - started, 3),
+                "note": self._run_note,
+                "error": error,
+            })
+            db.update_task_data(self.to_dict())
+        except Exception as e:
+            print(f"[TASK] !! Could not record the run of task {self.task_id}: {e}")
+
+    def _execute(self, agent_storage: AgentStorage, openai_client: OpenAIClient, events,
+                 request_builder: RequestBuilder):
+        """
         Executes the task
         :param request_builder: Singleton instance of RequestBuilder (to build API Calls etc)
         :param agent_storage: Singleton instance of AgentStorage containing all agents (to load agents)
@@ -368,6 +412,7 @@ class Task:
         # Check if the agent's max_depth has been reached
         depth_check_result = self.check_max_depth_reached(current_agent, top_level_task)
         if depth_check_result['is_max_depth_reached']:
+            self._run_note = "gave up: " + depth_check_result['message']
             print(f"[TASK] -- {depth_check_result['message']}")
             # A subtask that gives up still has to report back, otherwise its parent waits
             # on a sibling that will never arrive and the chat stays busy forever.
@@ -462,6 +507,8 @@ class Task:
             # 3.1.4 Return the new tasks. They run as siblings and the last one to finish
             # re-queues this task.
             print(f"[TASK] -- Spawned {len(child_task_ids)} child task(s): {child_task_ids}")
+            self._run_note = "delegated to " + ", ".join(
+                action_map[a].name for a in delegated)
             return child_task_ids
 
         # 3.2 If action selection returns 0 -> Agent is done
@@ -484,6 +531,7 @@ class Task:
             # 3.2.2 If task is a top level task, send response to user (parent_task_id == None)
             if self.parent_task_id is None:
                 # 3.2.2.1 Send message to user
+                self._run_note = "answered the user"
                 print(f"[TASK] ---- Sending message to user: {response}")
                 events.send_message(self.chat_id, response)
 
@@ -553,4 +601,5 @@ class Task:
             "inherited_memory_count": self.inherited_memory_count,
             "child_index": self.child_index,
             "pending_results": self.pending_results,
+            "runs": self.runs,
         }
