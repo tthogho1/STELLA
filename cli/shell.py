@@ -26,6 +26,7 @@ AVAILABLE_COMMANDS = """Available commands:
     /workspace rename <id> <name>               rename workspace
     /workspace delete <id>                      delete workspace
     /status                                     show workspace status
+    /trace [task id]                            show how the last request ran
     
     /add <agent id>                             add agent to workspace
     /remove <agent id>                          remove agent from workspace
@@ -253,6 +254,9 @@ class Shell:
             else:
                 self.client.install_agent(args[1])
                 return
+        elif args[0] == 'trace':
+            self.client.get_trace(args[1] if len(args) > 1 else None)
+            return
         elif args[0] == 'status':
             try:
                 workspace = self.client.get_workspace_by_id(self.client.session.workspace_id)

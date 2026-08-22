@@ -113,7 +113,8 @@ class SQLite(DatabaseInterface, ABC):
                 "pending_children" INTEGER DEFAULT 0,
                 "inherited_memory_count" INTEGER DEFAULT 0,
                 "child_index" INTEGER,
-                "pending_results" TEXT
+                "pending_results" TEXT,
+                "runs" TEXT
             )
         '''
 
@@ -145,6 +146,7 @@ class SQLite(DatabaseInterface, ABC):
                  'ALTER TABLE task ADD COLUMN inherited_memory_count INTEGER DEFAULT 0'),
                 ('child_index', 'ALTER TABLE task ADD COLUMN child_index INTEGER'),
                 ('pending_results', 'ALTER TABLE task ADD COLUMN pending_results TEXT'),
+                ('runs', 'ALTER TABLE task ADD COLUMN runs TEXT'),
         ):
             if column not in existing:
                 print(f"[SQLite] Adding missing column task.{column}")
@@ -301,7 +303,8 @@ class SQLite(DatabaseInterface, ABC):
             "pending_children": row['pending_children'] or 0,
             "inherited_memory_count": row['inherited_memory_count'] or 0,
             "child_index": row['child_index'],
-            "pending_results": json.loads(row['pending_results']) if row['pending_results'] else {}
+            "pending_results": json.loads(row['pending_results']) if row['pending_results'] else {},
+            "runs": json.loads(row['runs']) if row['runs'] else []
         }
         return task_data
 
@@ -310,11 +313,11 @@ class SQLite(DatabaseInterface, ABC):
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                     pending_children=0, inherited_memory_count=0, child_index=None,
-                    pending_results=None):
+                    pending_results=None, runs=None):
         cursor = self.conn.cursor()
 
         cursor.execute(
-            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children, inherited_memory_count, child_index, pending_results) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task (chat_id, agents, owner, coordinator_agent, current_agent, memories, parent_task_id, top_level_task_id, completed, created_at, depths, is_top_level, top_level_task_max_depth, top_level_task_depth, pending_children, inherited_memory_count, child_index, pending_results, runs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chat_id, json.dumps(agents), owner, coordinator_agent, current_agent, json.dumps(memories), parent_task_id,
              top_level_task_id, int(completed), created_at, json.dumps(depths), int(is_top_level),
              top_level_task_max_depth,
@@ -322,7 +325,8 @@ class SQLite(DatabaseInterface, ABC):
              int(pending_children),
              int(inherited_memory_count),
              child_index,
-             json.dumps(pending_results or {}))
+             json.dumps(pending_results or {}),
+             json.dumps(runs or []))
         )
 
         task_id = cursor.lastrowid
@@ -346,7 +350,8 @@ class SQLite(DatabaseInterface, ABC):
             "pending_children": pending_children,
             "inherited_memory_count": inherited_memory_count,
             "child_index": child_index,
-            "pending_results": pending_results or {}
+            "pending_results": pending_results or {},
+            "runs": runs or []
         }
 
         print(f"CREATING TASK:")
@@ -431,7 +436,7 @@ class SQLite(DatabaseInterface, ABC):
         print(f"UPDATING TASK")
         print(json.dumps(task_data))
         cursor.execute(
-            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ?, inherited_memory_count = ?, child_index = ?, pending_results = ? WHERE id = ?",
+            "UPDATE task SET chat_id = ?, agents = ?, owner = ?, coordinator_agent = ?, current_agent = ?, memories = ?, parent_task_id = ?, top_level_task_id = ?, completed = ?, created_at = ?, depths = ?, is_top_level = ?, top_level_task_max_depth = ?, top_level_task_depth = ?, pending_children = ?, inherited_memory_count = ?, child_index = ?, pending_results = ?, runs = ? WHERE id = ?",
             (
                 task_data['chat_id'],
                 json.dumps(task_data['agents']),
@@ -451,10 +456,25 @@ class SQLite(DatabaseInterface, ABC):
                 int(task_data.get('inherited_memory_count', 0) or 0),
                 task_data.get('child_index', None),
                 json.dumps(task_data.get('pending_results', {}) or {}),
+                json.dumps(task_data.get('runs', []) or []),
                 task_data.get('task_id', None)
             ))
         self.conn.commit()
         return task_data
+
+    @_synchronized
+    def get_top_level_task_ids(self, chat_id) -> list:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM task WHERE chat_id = ? AND is_top_level = 1 ORDER BY id",
+                       (chat_id,))
+        return [str(row['id']) for row in cursor.fetchall()]
+
+    @_synchronized
+    def get_tasks_for_top_level(self, top_level_task_id) -> list:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM task WHERE top_level_task_id = ? ORDER BY id",
+                       (top_level_task_id,))
+        return [self.get_task_data(str(row['id'])) for row in cursor.fetchall()]
 
     @_synchronized
     def store_child_result(self, task_id, child_index, memories) -> None:

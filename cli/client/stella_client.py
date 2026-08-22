@@ -448,6 +448,34 @@ class StellaClient:
         self.sio.emit("chat_message", json.dumps(json_data), namespace=self.socketio_namespace)
         self.waiting_for_response = True
 
+    def get_trace(self, task_id=None):
+        """
+        Fetches the execution trace of the last request in the current chat.
+
+        Only the final answer arrives over the socket, so this is the only way to see
+        afterwards which agents ran, how the tree was shaped and where the time went.
+        """
+        if self.session.chat_id is None:
+            print_error("You are not in a chat yet.")
+            return
+
+        url = f"chat/trace?chat_id={self.session.chat_id}"
+        if task_id:
+            url += f"&task_id={task_id}"
+
+        response = requests.get(self.compose_url(url), headers=self.auth_headers())
+        if response.status_code == 401:
+            print_error("You are not authenticated. Please login.")
+            return
+        if response.status_code != 200:
+            try:
+                print_error(response.json().get("msg", response.text))
+            except Exception:
+                print_error(f"Could not fetch the trace ({response.status_code}).")
+            return
+
+        print(response.json().get("rendered", ""))
+
     def get_user(self):
         response = requests.get(self.compose_url("user"), headers=self.auth_headers())
 

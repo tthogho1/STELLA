@@ -226,7 +226,8 @@ class MongoDB(DatabaseInterface, ABC):
             "pending_children": task.get('pending_children', 0) or 0,
             "inherited_memory_count": task.get('inherited_memory_count', 0) or 0,
             "child_index": task.get('child_index', None),
-            "pending_results": task.get('pending_results', {}) or {}
+            "pending_results": task.get('pending_results', {}) or {},
+            "runs": task.get('runs', []) or []
         }
 
         return task_data
@@ -235,7 +236,7 @@ class MongoDB(DatabaseInterface, ABC):
                     parent_task_id=None, top_level_task_id=None, completed=False, created_at=None, depths=None,
                     is_top_level=False, top_level_task_max_depth=None, top_level_task_depth=None,
                     pending_children=0, inherited_memory_count=0, child_index=None,
-                    pending_results=None):
+                    pending_results=None, runs=None):
         """
         Creates a new task in the database.
         :param chat_id: The id of the original chat where the message was sent by the user to Stella
@@ -273,7 +274,8 @@ class MongoDB(DatabaseInterface, ABC):
             "pending_children": pending_children,
             "inherited_memory_count": inherited_memory_count,
             "child_index": child_index,
-            "pending_results": pending_results or {}
+            "pending_results": pending_results or {},
+            "runs": runs or []
         }
         task_id = str(self.db.tasks.insert_one(task_data).inserted_id)
         task_data['task_id'] = str(task_id)
@@ -453,6 +455,16 @@ class MongoDB(DatabaseInterface, ABC):
         """
         self.db.tasks.update_one({"_id": ObjectId(task_data['task_id'])}, {"$set": task_data})
         return task_data
+
+    def get_top_level_task_ids(self, chat_id) -> list:
+        """The top level task of each request made in a chat, oldest first."""
+        return [str(t['_id']) for t in
+                self.db.tasks.find({"chat_id": chat_id, "is_top_level": True}).sort("_id", 1)]
+
+    def get_tasks_for_top_level(self, top_level_task_id) -> list:
+        """Every task belonging to one request, in creation order."""
+        return [self.get_task_data(str(t['_id']))
+                for t in self.db.tasks.find({"top_level_task_id": top_level_task_id}).sort("_id", 1)]
 
     def store_child_result(self, task_id, child_index, memories) -> None:
         """
