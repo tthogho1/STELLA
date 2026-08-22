@@ -58,13 +58,14 @@ dependencies = [
 requires-python = ">=3.9"
 
 [project.optional-dependencies]
-# Needed by stella_agents/CustomAgents/CitySearchAgent.py. Without it that one agent is
-# skipped at startup with a message and the rest still load.
-# The Databricks Vector Search client that stella_agents/tools/city_search.py imports
-# lazily (databricks.ai_search.client) is not listed: install whichever distribution
-# provides that import path in your workspace.
+# Needed by stella_agents/CustomAgents/CitySearchAgent.py. Without langchain-core that
+# one agent is skipped at startup with a message and the rest still load; without the
+# Databricks client the agent loads but every search returns "missing dependency".
+# databricks-ai-search is the current name -- databricks-vectorsearch is the deprecated
+# one and only re-exports databricks.ai_search.* under the old path.
 city-search = [
     "langchain-core >= 0.3.0",
+    "databricks-ai-search >= 0.78",
 ]
 dev = [
     "pip-tools",

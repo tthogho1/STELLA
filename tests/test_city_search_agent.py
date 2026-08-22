@@ -136,3 +136,29 @@ def test_the_tool_itself_reports_missing_credentials(monkeypatch):
 
     assert "missing env var" in data["error"]
     assert data["results"] == []
+
+
+def test_a_successful_search_says_not_to_run_it_again(agent, monkeypatch):
+    """
+    The index is a similarity search with no notion of exclusion, so "coffee outside
+    Africa" comes back with African cities and a summary saying they are not relevant.
+    Left at that, the coordinator reads the request as unanswered and re-runs the same
+    search until the depth limit ends the request with no answer.
+    """
+    payload = {
+        "query": "best cities for coffee outside of Africa", "count": 3,
+        "results": [{"title": "Coffee Bay", "url": "u1", "content": "c"},
+                    {"title": "Addis Ababa", "url": "u2", "content": "c"},
+                    {"title": "Harar", "url": "u3", "content": "c"}],
+        "summary": "The provided information is not relevant to the query.",
+    }
+    monkeypatch.setattr(
+        "stella_agents.CustomAgents.CitySearchAgent.search_cities",
+        type("T", (), {"invoke": staticmethod(lambda _: json.dumps(payload))})(),
+    )
+
+    out = agent.respond(_Client(), None, chat=make_chat(["coffee, but not in Africa"]))
+
+    assert "Addis Ababa" in out, "the results still have to be handed over"
+    assert "do not call this agent again" in out
+    assert "same rows" in out, "the coordinator needs to know a retry changes nothing"

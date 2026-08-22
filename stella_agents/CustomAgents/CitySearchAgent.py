@@ -75,6 +75,13 @@ class CitySearchAgent(Agent):
         The tool reports its own failures in an "error" field rather than raising, so
         those have to be surfaced here or the coordinator sees an empty result and simply
         calls the agent again.
+
+        A successful search needs the same care. This is a similarity search over a fixed
+        index: it has no notion of "not in Africa", so a request phrased as an exclusion
+        comes back with exactly what was excluded, and the summary itself may say the
+        results are not relevant. The coordinator reads that as the request still being
+        unanswered and re-runs the search, which returns the same rows every time. Say
+        outright that this is everything the index holds for the query.
         """
         try:
             data = json.loads(raw)
@@ -98,6 +105,14 @@ class CitySearchAgent(Agent):
             title = result.get("title", "N/A")
             url = result.get("url")
             lines.append(f"- {title}" + (f" ({url})" if url else ""))
+
+        lines.append(
+            "These are the closest matches the travel index holds for that query, and it "
+            "is the only place this agent can look. Running the same search again returns "
+            "the same rows, so do not call this agent again for this request. If they do "
+            "not fit what the user asked for -- the index cannot express exclusions such "
+            "as \"not in Africa\" -- say so and answer from what you know instead."
+        )
 
         return "\n".join(lines)
 
