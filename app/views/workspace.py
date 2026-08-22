@@ -1,17 +1,12 @@
-import os
-
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.db import db
-import dotenv
+from app.utils.view_helpers import get_owned_or_404
 
 from flask import current_app
 
-dotenv.load_dotenv()
-
 workspace_views = Blueprint('workspace_views', __name__)
-BCRYPT_SALT = os.getenv('BCRYPT_SALT')
 
 
 @workspace_views.route('/workspace', methods=['POST'])
@@ -61,14 +56,10 @@ def get_workspace(workspace_id):
     """
     user_id = get_jwt_identity()
 
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user has access to the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User does not have access to the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User does not have access to the workspace")
+    if err:
+        return err
 
     return jsonify({"workspace": workspace.to_dict()}), 200
 
@@ -83,15 +74,10 @@ def delete_workspace(workspace_id):
     """
     user_id = get_jwt_identity()
 
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User does not have access to the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User does not have access to the workspace")
+    if err:
+        return err
 
     # Delete the workspace
     try:
@@ -110,15 +96,10 @@ def get_workspace_chats(workspace_id):
     :param workspace_id:
     :return:
     """
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != get_jwt_identity():
-        return jsonify({"msg": "User does not have access to the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, get_jwt_identity(),
+                                       not_owner_msg="User does not have access to the workspace")
+    if err:
+        return err
 
     # Get all chats for the workspace
     try:
@@ -152,15 +133,10 @@ def add_agent(workspace_id):
 
     user_id = get_jwt_identity()
 
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User is not the owner of the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User is not the owner of the workspace")
+    if err:
+        return err
 
     # Add the agent to the workspace agents
     workspace.agents[agent_id] = {}
@@ -192,15 +168,10 @@ def remove_agent(workspace_id):
 
     user_id = get_jwt_identity()
 
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User is not the owner of the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User is not the owner of the workspace")
+    if err:
+        return err
 
     # Remove the agent from the workspace agents
     workspace.agents.pop(agent_id, None)
@@ -237,15 +208,10 @@ def set_coordinator(workspace_id):
 
     user_id = get_jwt_identity()
 
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User is not the owner of the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User is not the owner of the workspace")
+    if err:
+        return err
 
     # Set the coordinator agent
     print(f"Setting coordinator agent to {agent_id} for workspace {workspace.to_dict()}")
@@ -283,15 +249,10 @@ def rename_workspace(workspace_id):
 
     user_id = get_jwt_identity()
 
-    # Find the workspace in the database
-    try:
-        workspace = db.get_workspace(workspace_id)
-    except Exception as e:
-        return jsonify({"msg": str(e)}), 404
-
-    # Check if the user is the owner of the workspace
-    if workspace.owner != user_id:
-        return jsonify({"msg": "User is not the owner of the workspace"}), 403
+    workspace, err = get_owned_or_404(db.get_workspace, workspace_id, user_id,
+                                       not_owner_msg="User is not the owner of the workspace")
+    if err:
+        return err
 
     # Rename the workspace
     workspace.name = name
