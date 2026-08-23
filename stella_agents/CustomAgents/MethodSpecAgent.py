@@ -61,6 +61,11 @@ def roots_for(chat):
     return SPEC_SOURCE_ROOT, SPEC_OUTPUT_ROOT
 
 
+# Open questions kept per method. The prompt does most of the work (see SYSTEM_PROMPT),
+# but a long method with many collaborators still invites a list, and a reader who is
+# handed twenty questions reads none of them.
+MAX_QUESTIONS_PER_METHOD = int(os.getenv("SPEC_MAX_QUESTIONS_PER_METHOD", "3"))
+
 # How many methods the digest names before it stops. The file always has all of them.
 MAX_METHODS_IN_DIGEST = int(os.getenv("SPEC_MAX_METHODS_IN_DIGEST", "8"))
 
@@ -193,18 +198,30 @@ FINDINGS_SCHEMA = {
         "uncertainties": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "questions a reviewer must answer, not code fragments",
+            "description": "questions only a person who knows the intended behaviour can "
+                           "answer; empty when the code settles everything",
         },
     },
     "required": ["responsibility", "findings", "uncertainties"],
     "additionalProperties": False,
 }
 
+# "Anything you cannot determine from this file alone goes in uncertainties" -- the
+# instruction this replaced -- asked for one question per collaborator, since a call into
+# another class is by definition not determinable from this file. Measured over three
+# runs of the sample sources it produced 16 questions, 5 of which a person actually had
+# to answer; the rest were "how does PaymentGateway.charge work", answerable by opening
+# the file. What belongs here has to be stated as what it is, not as what is missing.
 SYSTEM_PROMPT = (
     "You document existing source code. Describe only what the code shows: never state a "
     "business rule it does not prove. Every finding cites the line number it came from, "
-    "exactly as numbered in the input. Anything you cannot determine from this file alone "
-    "goes in uncertainties, written as a question a reviewer should answer."
+    "exactly as numbered in the input. "
+    "An uncertainty is something NO code anywhere can settle: intent, a business rule, or "
+    "what should happen in a case this code does not handle. Never ask what reading "
+    "another file would answer -- what a class you call does, how a method you call is "
+    "implemented, what a library function means, how a field is initialised, and what a "
+    "type contains are all answered by opening them, and are never uncertainties. Most "
+    "methods raise none: return an empty list rather than filling it."
 )
 
 
@@ -331,6 +348,33 @@ class MethodSpecAgent(Agent):
             finding["source_line"] = stripped
             kept.append(finding)
         return sorted(kept, key=lambda f: f["line"])
+
+    @staticmethod
+    def _clean_questions(questions):
+        """
+        Drops empties and near-duplicates, then keeps the first few.
+
+        Near-duplicates are common: asked about each method in turn, a model raises the
+        same doubt about a collaborator every time it appears. Comparing on letters and
+        digits alone catches the rewordings ("What the customer request contains" against
+        "what the CustomerRequest contains") that an exact match would keep both of.
+        """
+        seen = set()
+        kept = []
+        for question in questions or []:
+            # Asked for a list, a model sometimes writes the list markers too, and they
+            # arrive as part of the text: "* how the validator instance is obtained".
+            text = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", (question or "")).strip()
+            if not text:
+                continue
+            key = re.sub(r"[^a-z0-9]", "", text.lower())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(text)
+            if len(kept) >= MAX_QUESTIONS_PER_METHOD:
+                break
+        return kept
 
     @staticmethod
     def _clean_outputs(outputs):
@@ -509,6 +553,7 @@ class MethodSpecAgent(Agent):
             method["findings"] = self._clean_findings(
                 method.get("findings") or [], source.splitlines(),
                 span=spans[method["method_name"]])
+            method["uncertainties"] = self._clean_questions(method.get("uncertainties"))
             # Prefer the signature the code actually declares over the model's reading.
             declared_inputs, declared_outputs = self._signature_from_source(
                 source.splitlines()[method["line"] - 1])

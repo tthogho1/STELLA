@@ -12,6 +12,7 @@ the parts nobody has confirmed yet.
 """
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 from stella_core.models.agent import Agent
@@ -82,6 +83,26 @@ class SpecDocumentAgent(Agent):
             except (OSError, json.JSONDecodeError) as e:
                 problems.append((entry["source"], f"its specification could not be read ({e})"))
         return index, specs, problems
+
+    @staticmethod
+    def _documented_elsewhere(question, class_names):
+        """
+        The classes this question asks about that this document already covers.
+
+        Used to annotate, not to drop. Deleting on this signal was tried and measured
+        against real output: "what should happen if customerService.register(request)
+        returns an exception" -- a question only a person can answer -- names a class in
+        the scan just as "what the customer service class entails" does, and no rule
+        separated the two without also removing the first. Losing a real question is a
+        worse outcome than carrying one that turns out to be answerable, so the reader is
+        told where to look and decides.
+
+        Matched on letters and digits alone, because a model writes `CustomerRequest` as
+        "the customer request" about as often as not.
+        """
+        key = re.sub(r"[^a-z0-9]", "", question.lower())
+        return sorted({name for name in class_names
+                       if len(name) > 3 and re.sub(r"[^a-z0-9]", "", name.lower()) in key})
 
     @staticmethod
     def _method_section(method, out):
@@ -159,11 +180,17 @@ class SpecDocumentAgent(Agent):
             out.append("Nothing in the code answered these. They need a person who knows "
                        "the intended behaviour.")
             out.append("")
-            out.append("| File | Method | Question |")
-            out.append("| --- | --- | --- |")
+            out.append("| File | Method | Question | Covered here |")
+            out.append("| --- | --- | --- | --- |")
+            class_names = {s.get("class_name") for s in specs if s.get("class_name")}
             for source, method_name, question in questions:
+                named = self._documented_elsewhere(question, class_names)
+                reference = ", ".join(f"`{_escape(n)}`" for n in named) if named else ""
                 out.append(f"| `{_escape(source)}` | `{_escape(method_name)}` "
-                           f"| {_escape(question)} |")
+                           f"| {_escape(question)} | {reference} |")
+            out.append("")
+            out.append("A class in the last column is documented above: read that section "
+                       "before asking anyone.")
             out.append("")
 
         if problems:

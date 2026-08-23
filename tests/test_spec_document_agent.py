@@ -165,3 +165,40 @@ class TestWriting:
 
         assert "orderRepo.save" not in answer
         assert len(answer) < 300
+
+
+class TestQuestionCrossReferences:
+    """
+    A question naming a class the scan documented can be answered by reading that
+    section. It is annotated rather than removed: dropping on this signal was measured
+    against real output and would have taken "what should happen if
+    customerService.register(request) returns an exception" with it.
+    """
+
+    def test_a_question_naming_a_documented_class_is_annotated(self, agent):
+        a = agent[0] if isinstance(agent, tuple) else agent
+
+        assert a._documented_elsewhere(
+            "What does the CustomerRequest contain?",
+            {"CustomerRequest", "BillingService"}) == ["CustomerRequest"]
+
+    def test_a_name_written_as_prose_is_still_matched(self, agent):
+        """Models write `CustomerRequest` as "the customer request" about as often."""
+        a = agent[0] if isinstance(agent, tuple) else agent
+
+        assert a._documented_elsewhere(
+            "What the customer request data structure contains",
+            {"CustomerRequest"}) == ["CustomerRequest"]
+
+    def test_a_question_about_intent_is_not_annotated(self, agent):
+        a = agent[0] if isinstance(agent, tuple) else agent
+
+        assert a._documented_elsewhere(
+            "What order is cancelled if there is more than one with the same id?",
+            {"CustomerRequest", "BillingService"}) == []
+
+    def test_a_very_short_class_name_does_not_match_everything(self, agent):
+        """A class called `Id` would otherwise annotate every question mentioning an id."""
+        a = agent[0] if isinstance(agent, tuple) else agent
+
+        assert a._documented_elsewhere("What identifies an order?", {"Id"}) == []

@@ -82,6 +82,44 @@ their own. **A specification extracted from code describes what the code does, n
 is supposed to do** — the two are not the same, and the open questions are where the
 difference shows up.
 
+### Open questions, and what they are not
+
+The section at the end of the document is for what **no code anywhere settles**: intent,
+a business rule, what should happen in a case the code does not handle.
+
+It did not start out that way. The instruction was "anything you cannot determine from
+this file alone goes in uncertainties" — and a call into another class is, by definition,
+not determinable from this file. The model dutifully filed one question per collaborator.
+Measured over three runs of the sample sources:
+
+| | Questions | A person actually had to answer |
+| --- | ---: | ---: |
+| "cannot determine from this file alone" | 16 (5.3 per run) | 5 (31%) |
+| Saying what an uncertainty *is* | 9 (3.0 per run) | 7 (78%) |
+
+An independent six-run sample of the same wording produced 12, of which 11 survived
+cleaning, and held the ratio (about 73%). Read all of these as the rough figures they
+are: one three-run sample of the new wording came back with **nothing at all**, and six
+runs went `1, 0, 3, 4, 1, 3`. The variance between runs is larger than the difference
+this table is measuring, so three runs is not enough to conclude anything smaller than
+the change above.
+
+The rest were "how does `PaymentGateway.charge` work" — answerable by opening the file.
+Telling the model that most methods raise none, and to return an empty list rather than
+fill it, is part of what did it: one run of three now returns nothing at all.
+
+Three limits hold whatever comes back: list markers a model wrote into the items are
+stripped (`* how the validator instance is obtained` arrives exactly like that),
+near-duplicates are collapsed (the same doubt is raised again every time a collaborator
+appears), and `SPEC_MAX_QUESTIONS_PER_METHOD` caps the rest.
+
+A question naming a class the scan documented is **annotated**, not dropped — the last
+column points at the section that answers it. Dropping was tried against real output and
+rejected: `what should happen if customerService.register(request) returns an exception`
+names a documented class exactly as `what the customer service class entails` does, and
+no rule separated them without taking the real question too. Losing one is worse than
+carrying one that turns out to be answerable, so the reader is told where to look.
+
 ### What the model is and is not asked to do
 
 Testing against `llama3.1:8b` and `qwen2.5-coder:7b` found a sharp split, and the design
@@ -117,6 +155,7 @@ Read from `app/.env`. See `app/.env_template` for the full list.
 | `SPEC_CONCURRENCY` | `4` | Files documented at once; keep under `OPENAI_MAX_WORKERS` |
 | `SPEC_MAX_SOURCE_CHARS` | `40000` | A larger file is refused rather than truncated |
 | `SPEC_MAX_METHODS_PER_FILE` | `12` | One model call per method, so a large class is a long request |
+| `SPEC_MAX_QUESTIONS_PER_METHOD` | `3` | Open questions kept per method, after near-duplicates are collapsed |
 | `SPEC_DB_PATTERN` | *(blank)* | Receivers counted as database access. Blank uses the default (`repo`, `dao`, `mapper`, `entitymanager`, `jdbc`, `session`) |
 | `SPEC_EXTERNAL_PATTERN` | *(blank)* | Receivers counted as leaving the system (`gateway`, `client`, `api`, `kafka`, …) |
 | `SPEC_DOCUMENT_NAME` | `specification.md` | The rendered document |
