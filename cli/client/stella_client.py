@@ -64,7 +64,7 @@ class StellaClient:
         self.host = host
         self.port = port
         self.ssl = ssl
-        self.socket_url = f"{'https://' if ssl else 'http://'}{self.host}{':' if self.port else ''}{self.port}/chat/connect"
+        self.socket_url = self.compose_url("chat/connect")
         self.socketio_namespace = "/chat"
 
         self.session = Session(session_file_path=session_file_path)
@@ -114,7 +114,16 @@ class StellaClient:
             return False
 
     def compose_url(self, endpoint):
-        return f"{'https://' if self.ssl else 'http://'}{self.host}{':' if self.port else ''}{self.port}/{endpoint}"
+        """
+        Builds a server URL.
+
+        The port is omitted when there is none, so an https deployment behind a reverse
+        proxy on 443 works: the old form interpolated None into the host and produced
+        "https://example.comNone/ping".
+        """
+        scheme = "https" if self.ssl else "http"
+        authority = f"{self.host}:{self.port}" if self.port else f"{self.host}"
+        return f"{scheme}://{authority}/{endpoint}"
 
     def login(self, username, password):
         try:

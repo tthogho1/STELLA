@@ -1,4 +1,5 @@
 {
   "host": "localhost",
-  "port": 5001
+  "port": 5001,
+  "ssl": false
 }
