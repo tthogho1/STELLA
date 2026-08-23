@@ -156,7 +156,6 @@ loaded, marking what this workspace already has:
 /agents
     brewery_agent               Fetch brewery data
   * demo_weather_agent          Fetch weather data
-    repository_spec_agent       Document every source file under a directory
     my_agent                    What this agent does
 
 /add my_agent
@@ -228,18 +227,13 @@ to a workspace until you `/add` them.
 | `god_agent` | Adds a twist to a wish |
 | `stella/stella_cactus_agent` | Tells a story. Shows `on_completion` side effects with `skip_response` |
 
-**Custom agents** — see [`stella_agents/CustomAgents/README.md`](stella_agents/CustomAgents/README.md):
+Beyond these, [`stella_agents/CustomAgents/`](stella_agents/CustomAgents/README.md) holds
+agents that are not part of the demo set — among them a pipeline that documents source
+code with a local model. They are not listed here because they change: run `/agents` for
+what a server actually has, and read that directory's README for what each one does.
 
-| Agent id | What it does |
-| --- | --- |
-| `method_spec_agent` | Reads one source file and extracts a specification of its methods, citing a line for every finding |
-| `repository_spec_agent` | Walks a directory, documents every file in it, and writes an index |
-| `spec_document_agent` | Renders those specifications as a Markdown document |
-| `city_search_agent` | Travel destination search over a Databricks Vector Search index. Needs credentials; without them it loads and reports that the lookup is unavailable |
-
-The three specification agents chain together and run against a local model, so no source
-code leaves the machine. `stella_coordinator_agent` and `stella_welcome_agent` are chosen
-automatically and are not added by hand.
+`stella_coordinator_agent` and `stella_welcome_agent` are chosen automatically and are not
+added by hand.
 
 ### Repository Layout
 
