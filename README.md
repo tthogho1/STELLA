@@ -156,10 +156,13 @@ loaded, marking what this workspace already has:
 /agents
     brewery_agent               Fetch brewery data
   * demo_weather_agent          Fetch weather data
+    repository_spec_agent       Document every source file under a directory
     my_agent                    What this agent does
 
 /add my_agent
 ```
+
+An asterisk marks what this workspace already has.
 
 Until you do, the agent exists but nothing will call it. With no agents at all a
 workspace answers through `stella_welcome_agent`; add one and the coordinator takes over
@@ -209,6 +212,34 @@ Only the final answer reaches the user, so `/trace` in the CLI (or
 delegated to, in what shape, how many times each ran, and where the time went. Siblings
 appear in the order they were delegated, and the total is wall clock rather than the sum
 of the spans, since parallel agents overlap.
+
+### Agents That Ship With STELLA
+
+`/agents` lists these at runtime, together with anything installed since. None are added
+to a workspace until you `/add` them.
+
+**Demo agents** — small examples of the shapes an agent can take:
+
+| Agent id | What it does |
+| --- | --- |
+| `demo_weather_agent` | Fetches the weather for a city. The example to copy for calling an external API |
+| `brewery_agent` | Looks up breweries in a city |
+| `steam_agent` | Fetches data about a game |
+| `god_agent` | Adds a twist to a wish |
+| `stella/stella_cactus_agent` | Tells a story. Shows `on_completion` side effects with `skip_response` |
+
+**Custom agents** — see [`stella_agents/CustomAgents/README.md`](stella_agents/CustomAgents/README.md):
+
+| Agent id | What it does |
+| --- | --- |
+| `method_spec_agent` | Reads one source file and extracts a specification of its methods, citing a line for every finding |
+| `repository_spec_agent` | Walks a directory, documents every file in it, and writes an index |
+| `spec_document_agent` | Renders those specifications as a Markdown document |
+| `city_search_agent` | Travel destination search over a Databricks Vector Search index. Needs credentials; without them it loads and reports that the lookup is unavailable |
+
+The three specification agents chain together and run against a local model, so no source
+code leaves the machine. `stella_coordinator_agent` and `stella_welcome_agent` are chosen
+automatically and are not added by hand.
 
 ### Repository Layout
 
