@@ -81,6 +81,14 @@ SQL_STATEMENT = re.compile(r"\b(select|insert into|update\s+\w+\s+set|delete fro
                            re.IGNORECASE)
 THROWS = re.compile(r"\bthrow\b|orElseThrow|\bcatch\s*\(")
 TRANSACTIONAL = re.compile(r"@Transactional|beginTransaction|\.commit\(|\.rollback\(")
+DECLARATION = re.compile(
+    r"^\s*(public|protected|private|static|final|abstract|synchronized|\s)*"
+    r"[\w<>\[\],\s]+\s+\w+\s*\([^;]*$")
+SIGNATURE = re.compile(
+    r"^(?:(?:public|protected|private|static|final|abstract|synchronized|default)\s+)*"
+    r"(?:<[^>]+>\s+)?"                     # a generic declaration, discarded
+    r"(?P<returns>[\w.<>\[\],\s]*?)\s*"    # empty for a constructor
+    r"(?P<name>\w+)\s*\((?P<params>[^)]*)\)")
 BRANCHES = re.compile(r"^\s*(if|else\s+if|switch|case|while|for)\b|\?.*:")
 
 KIND_MEANINGS = {
@@ -225,6 +233,90 @@ class MethodSpecAgent(Agent):
         return "\n".join(f"{i:>4}: {line}" for i, line in enumerate(source.splitlines(), 1))
 
     @staticmethod
+    def _signature_from_source(declaration_line):
+        """
+        Reads the return type and parameters off the declaration.
+
+        Same reasoning as classify(): the model is asked where the method is, and the
+        signature is then read from the code. Left to the model it drifts -- one run
+        returned outputs ["Receipt", "T"] and inputs ["orderId", "force", "String",
+        "boolean"], mixing names, types and a stray generic into the same list.
+        :return: (inputs, outputs), or (None, None) when the line cannot be parsed
+        """
+        match = SIGNATURE.match(declaration_line.strip())
+        if not match:
+            return None, None
+
+        returns = (match.group("returns") or "").strip()
+        outputs = [] if returns in ("", "void") else [returns]
+
+        params, depth, current = [], 0, ""
+        for char in match.group("params"):
+            # split on commas that are not inside Map<K, V>
+            if char in "<([":
+                depth += 1
+            elif char in ">)]":
+                depth -= 1
+            if char == "," and depth == 0:
+                params.append(current)
+                current = ""
+            else:
+                current += char
+        params.append(current)
+
+        inputs = []
+        for param in params:
+            words = param.replace("final ", "").strip().split()
+            if len(words) >= 2:
+                inputs.append(f"{words[-1]}: {' '.join(words[:-1])}")
+            elif words:
+                inputs.append(words[0])
+        return inputs, outputs
+
+    @staticmethod
+    def _clean_findings(findings, source_lines, span):
+        """
+        Classifies each finding and drops the ones that are not steps of this method.
+
+        Three things come back that should not be kept: the same line reported twice, the
+        method's own signature line, and lines belonging to the next method along -- the
+        whole file is in the prompt, so a neighbour's body is right there to be picked up.
+        """
+        start, end = span
+        kept, seen = [], set()
+        for finding in findings:
+            line = finding.get("line")
+            if not isinstance(line, int) or not (1 <= line <= len(source_lines)):
+                continue
+            if not (start <= line <= end):
+                continue
+            text = source_lines[line - 1]
+            stripped = text.strip()
+            # the signature itself is not a step in the method
+            if DECLARATION.match(stripped):
+                continue
+            if line in seen:
+                continue
+            seen.add(line)
+            finding["kind"] = classify(text)
+            finding["source_line"] = stripped
+            kept.append(finding)
+        return sorted(kept, key=lambda f: f["line"])
+
+    @staticmethod
+    def _clean_outputs(outputs):
+        """
+        Normalises "no return value" to an empty list.
+
+        Models write it as "void", "None", "No output" and an empty string, all of which
+        would otherwise be rendered as if they were a type.
+        """
+        if not outputs:
+            return []
+        return [o for o in outputs
+                if o and o.strip().lower() not in {"void", "none", "no output", "n/a", "-"}]
+
+    @staticmethod
     def _write(relative_source, class_name, methods):
         """
         Writes the full specification next to a mirror of the source tree.
@@ -362,6 +454,22 @@ class MethodSpecAgent(Agent):
         if not methods:
             return f"No methods were found in {relative}. Tell the user."
 
+        # Where each method's body ends: the line before the next declaration. Findings
+        # outside that span belong to a different method -- with the whole file in the
+        # prompt, one method's analysis picks up lines from its neighbour.
+        # Sorted by declaration line first: the outline returns methods in whatever order
+        # the model listed them, and taking "the next one" from an unsorted list produces
+        # a span that ends before it starts, which silently discards every finding.
+        methods.sort(key=lambda m: m["line"])
+        spans = {}
+        starts = [m["line"] for m in methods]
+        last_line = len(source.splitlines())
+        for index, method in enumerate(methods):
+            end = starts[index + 1] - 1 if index + 1 < len(starts) else last_line
+            # start a few lines early: an annotation above the signature belongs to it
+            start = max(1, method["line"] - LINE_TOLERANCE)
+            spans[method["method_name"]] = (start, max(start, end))
+
         # One call per method. Sharing a call between methods costs the same accuracy the
         # signature fields did: findings start belonging to whichever method came last.
         for method in methods[:MAX_METHODS_PER_FILE]:
@@ -378,14 +486,17 @@ class MethodSpecAgent(Agent):
                                            f"({type(e).__name__}); it needs a manual review."]
                 continue
             method.update(detail)
-            # The model reported where; the code says what.
-            source_lines = source.splitlines()
-            for finding in method.get("findings") or []:
-                line = finding.get("line")
-                text = (source_lines[line - 1]
-                        if isinstance(line, int) and 1 <= line <= len(source_lines) else "")
-                finding["kind"] = classify(text)
-                finding["source_line"] = text.strip()
+            method["findings"] = self._clean_findings(
+                method.get("findings") or [], source.splitlines(),
+                span=spans[method["method_name"]])
+            # Prefer the signature the code actually declares over the model's reading.
+            declared_inputs, declared_outputs = self._signature_from_source(
+                source.splitlines()[method["line"] - 1])
+            if declared_inputs is not None:
+                method["inputs"] = declared_inputs
+                method["outputs"] = declared_outputs
+            else:
+                method["outputs"] = self._clean_outputs(method.get("outputs"))
 
         if len(methods) > MAX_METHODS_PER_FILE:
             methods = methods[:MAX_METHODS_PER_FILE]

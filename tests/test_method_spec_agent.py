@@ -280,3 +280,114 @@ class TestPatternOverrides:
 
         assert module.classify("order.markSettled();") == "other"
         assert module.classify("orderRepo.save(o);") == "db_operation"
+
+
+class TestFindingCleanup:
+    """What comes back from the model needs tidying before it is a specification."""
+
+    SOURCE = [
+        "class BillingService {",                                  # 1
+        "",                                                        # 2
+        "    @Transactional",                                      # 3
+        "    public Receipt settle(String orderId) {",             # 4
+        "        orderRepo.save(order);",                          # 5
+        "    }",                                                   # 6
+        "",                                                        # 7
+        "    public void cancel(String orderId) {",                # 8
+        "        orderRepo.delete(order);",                        # 9
+        "    }",                                                   # 10
+    ]
+
+    def _clean(self, agent, findings, span=(1, 6)):
+        a, _, _ = agent
+        return a._clean_findings(findings, self.SOURCE, span=span)
+
+    def test_the_same_line_twice_is_kept_once(self, agent):
+        kept = self._clean(agent, [{"detail": "save", "line": 5},
+                                   {"detail": "save again", "line": 5}])
+
+        assert [f["line"] for f in kept] == [5]
+
+    def test_the_methods_own_signature_is_not_a_step(self, agent):
+        kept = self._clean(agent, [{"detail": "takes an orderId", "line": 4},
+                                   {"detail": "save", "line": 5}])
+
+        assert [f["line"] for f in kept] == [5]
+
+    def test_a_neighbours_line_is_dropped(self, agent):
+        """The whole file is in the prompt, so the next method's body is right there."""
+        kept = self._clean(agent, [{"detail": "save", "line": 5},
+                                   {"detail": "belongs to cancel", "line": 9}])
+
+        assert [f["line"] for f in kept] == [5]
+
+    def test_a_line_off_the_end_is_dropped(self, agent):
+        assert self._clean(agent, [{"detail": "ghost", "line": 999}]) == []
+
+    def test_findings_come_back_in_line_order(self, agent):
+        kept = self._clean(agent, [{"detail": "save", "line": 5},
+                                   {"detail": "annotation", "line": 3}])
+
+        assert [f["line"] for f in kept] == [3, 5]
+
+    def test_the_source_line_is_kept_for_review(self, agent):
+        kept = self._clean(agent, [{"detail": "save", "line": 5}])
+
+        assert kept[0]["source_line"] == "orderRepo.save(order);"
+        assert kept[0]["kind"] == "db_operation"
+
+
+class TestSignatureFromSource:
+    """The signature is read off the declaration, for the same reason the kind is: one
+    run returned outputs ["Receipt", "T"] and inputs mixing names, types and a generic."""
+
+    def test_parameters_come_back_named_and_typed(self, agent):
+        a, _, _ = agent
+
+        inputs, outputs = a._signature_from_source(
+            "    public Receipt settle(String orderId, boolean force) {")
+
+        assert inputs == ["orderId: String", "force: boolean"]
+        assert outputs == ["Receipt"]
+
+    def test_void_has_no_output(self, agent):
+        a, _, _ = agent
+
+        assert a._signature_from_source("    public void cancel(String id) {")[1] == []
+
+    def test_a_generic_return_type_is_not_split_on_its_comma(self, agent):
+        a, _, _ = agent
+
+        inputs, outputs = a._signature_from_source(
+            "    private Map<String, List<Order>> group(int size, String key) {")
+
+        assert outputs == ["Map<String, List<Order>>"]
+        assert inputs == ["size: int", "key: String"]
+
+    def test_final_is_not_taken_for_a_type(self, agent):
+        a, _, _ = agent
+
+        assert a._signature_from_source("void f(final int size) {")[0] == ["size: int"]
+
+    def test_no_parameters(self, agent):
+        a, _, _ = agent
+
+        assert a._signature_from_source("public void run() {")[0] == []
+
+    def test_an_unparseable_line_says_so(self, agent):
+        """So the caller can fall back to what the model said rather than invent a void."""
+        a, _, _ = agent
+
+        assert a._signature_from_source("not a declaration") == (None, None)
+
+
+class TestMethodOrdering:
+    def test_spans_do_not_depend_on_the_order_the_model_listed_methods(self, agent):
+        """Taking "the next method" from an unsorted list gives a span that ends before
+        it starts, which silently discards every finding for that method."""
+        a, module, _ = agent
+        for order in ([("settle", 4), ("cancel", 8)], [("cancel", 8), ("settle", 4)]):
+            methods = [{"method_name": n, "line": l} for n, l in order]
+            methods.sort(key=lambda m: m["line"])
+
+            assert [m["method_name"] for m in methods] == ["settle", "cancel"]
