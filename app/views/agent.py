@@ -41,6 +41,38 @@ def package_manager_url():
     return (os.getenv("PACKAGE_MANAGER_URL") or DEFAULT_PACKAGE_MANAGER_URL).rstrip("/")
 
 
+# A package is a handful of .py files. Nothing legitimate needs more than this, and
+# without a ceiling a 199 KB download expands to 200 MB -- measured, deflate reaches
+# about 1000:1 on repetitive content.
+MAX_PACKAGE_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+
+
+def _safe_members(archive):
+    """
+    The entries of `archive` that are safe to extract, or ValueError explaining why not.
+
+    ZipFile.extract() already strips leading slashes and ".." components, so an entry
+    cannot escape the target directory. It does so silently though, which quietly moves
+    a file somewhere the package did not intend -- better to refuse the archive and say
+    so. The size ceiling is the part that actually protects anything.
+    """
+    members = []
+    total = 0
+    for info in archive.infolist():
+        name = info.filename
+        if "__MACOSX/" in name:
+            continue
+        if name.startswith(("/", "\\")) or ".." in name.replace("\\", "/").split("/"):
+            raise ValueError(f"the archive contains an out-of-tree path ({name})")
+        total += info.file_size
+        if total > MAX_PACKAGE_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                f"the archive expands to more than "
+                f"{MAX_PACKAGE_UNCOMPRESSED_BYTES // (1024 * 1024)} MB")
+        members.append(name)
+    return members
+
+
 @agent_views.route('/agent/download', methods=['GET'])
 @jwt_required()
 def download_package():
@@ -76,10 +108,15 @@ def download_package():
         
         downloaded_version = filename.removesuffix(".zip")
 
-        z = zipfile.ZipFile(io.BytesIO(response.content))
-        for file in z.namelist():
-            if "__MACOSX/" in file:
-                continue
+        try:
+            z = zipfile.ZipFile(io.BytesIO(response.content))
+            members = _safe_members(z)
+        except zipfile.BadZipFile:
+            return jsonify({"msg": f"{package_name} is not a valid zip archive"}), 502
+        except ValueError as e:
+            return jsonify({"msg": f"Refused to install {package_name}: {e}"}), 502
+
+        for file in members:
             z.extract(file, path=DOWNLOADED_AGENTS_DIR)
 
         return f"Successfully installed {package_name}:{downloaded_version}", response.status_code
