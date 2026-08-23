@@ -10,7 +10,13 @@ import zipfile
 
 import pytest
 
-from app.views.agent import MAX_PACKAGE_UNCOMPRESSED_BYTES, _safe_members
+from app.utils.archives import safe_members
+from app.views.agent import MAX_PACKAGE_UNCOMPRESSED_BYTES
+
+
+def _safe_members(archive):
+    """The checks as /agent/download applies them."""
+    return safe_members(archive, MAX_PACKAGE_UNCOMPRESSED_BYTES)
 
 
 def _zip(entries, compress=zipfile.ZIP_STORED):
