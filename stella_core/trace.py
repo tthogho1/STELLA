@@ -16,6 +16,18 @@ from stella_core.db import db
 MAX_TREE_DEPTH = 100
 
 
+def _sortable_id(task_id):
+    """
+    A tie-break key that works for either backend's ids.
+
+    Numeric ids sort numerically -- "10" after "9", not before it -- and anything else
+    falls back to the string. The tuple keeps the two kinds from being compared with each
+    other, which would raise.
+    """
+    text = str(task_id)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
 def build_trace(top_level_task_id):
     """
     Reads every task of one request back into a tree.
@@ -34,10 +46,15 @@ def build_trace(top_level_task_id):
             children.setdefault(str(parent), []).append(task)
 
     # Siblings are shown in the order they were delegated, which is the order the parent
-    # asked for them and the order it reads their results back.
+    # asked for them and the order it reads their results back. The task id only breaks a
+    # tie, and it is not always a number: SQLite hands out integers, MongoDB hex
+    # ObjectIds, and int() on one of those raised.
+    def order(task):
+        index = task.get("child_index")
+        return (index if index is not None else 0, _sortable_id(task["task_id"]))
+
     for siblings in children.values():
-        siblings.sort(key=lambda t: (t.get("child_index") if t.get("child_index") is not None else 0,
-                                     int(t["task_id"])))
+        siblings.sort(key=order)
 
     def node(task, depth=0):
         runs = task.get("runs") or []

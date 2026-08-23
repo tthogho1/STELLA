@@ -135,3 +135,36 @@ class TestRendering:
 
     def test_an_empty_trace_renders_empty(self):
         assert render_trace(None) == ""
+
+
+class TestBackendIdFormats:
+    """Task ids are integers in SQLite and hex ObjectIds in MongoDB. The sibling ordering
+    used int() on them, which raised on every MongoDB trace."""
+
+    def test_ids_of_either_shape_sort_without_raising(self):
+        from stella_core.trace import _sortable_id
+
+        mixed = ["10", "9", "2", "6a8a531231d91d057912dee5", "abc"]
+
+        assert sorted(mixed, key=_sortable_id)  # the point is that this does not raise
+
+    def test_numeric_ids_sort_numerically(self):
+        from stella_core.trace import _sortable_id
+
+        assert sorted(["10", "9", "2"], key=_sortable_id) == ["2", "9", "10"]
+
+    def test_a_real_trace_builds_on_this_backend(self, db):
+        """Runs against both backends, which is how the int() crash was found."""
+        root = db.create_task(chat_id="1", agents={}, owner="1", coordinator_agent="c",
+                              current_agent="root", memories=[], is_top_level=True,
+                              runs=[_run(1, 1.0)])["task_id"]
+        db.update_task_data({**db.get_task_data(root), "top_level_task_id": root})
+        for index in (1, 0):
+            db.create_task(chat_id="1", agents={}, owner="1", coordinator_agent="c",
+                           current_agent=f"child{index}", memories=[], parent_task_id=root,
+                           top_level_task_id=root, child_index=index, runs=[_run(2, 0.5)])
+
+        tree = build_trace(root)
+
+        assert [c["agent"] for c in tree["children"]] == ["child0", "child1"]
+        assert render_trace(tree).startswith("root")

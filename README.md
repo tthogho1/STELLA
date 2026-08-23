@@ -88,6 +88,32 @@ For a complete guide, visit [Getting Started](https://docs.stellaframework.com/G
 > install made before that will not see them:
 > `ModuleNotFoundError: No module named 'stella_agents'`.
 
+### Connecting to a Remote Server
+
+The CLI is a client and nothing more -- it never imports the server -- so it can talk to
+one on another machine. `cli/config.json`:
+
+```json
+{
+  "host": "stella.example.com",
+  "ssl": true
+}
+```
+
+`"port"` may be left out when a reverse proxy answers on the standard port. `"ssl"`
+defaults to `false`, which is what localhost wants.
+
+**Turn `ssl` on for anything that is not localhost.** Over plain http the CLI sends the
+password on `/login` and the JWT on every request after it in the clear. STELLA does not
+terminate TLS itself, so put a reverse proxy in front of it.
+
+For one or two people an SSH tunnel is less work than a certificate, and needs no
+configuration change at all:
+
+```bash
+ssh -L 5001:localhost:5001 you@stella.example.com
+```
+
 ### Creating an Agent
 
 Registering an agent is two steps: STELLA has to **find** the class, and a workspace has

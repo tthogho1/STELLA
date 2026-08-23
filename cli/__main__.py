@@ -26,7 +26,12 @@ def main():
     # Create client
     client = StellaClient(
         host=config['host'],
-        port=config['port'],
+        port=config.get('port'),
+        # StellaClient has always taken this; nothing passed it, so the CLI could only
+        # ever speak plain http -- including the password on /login and the JWT on every
+        # request after it. Optional so an existing config.json without the key still
+        # loads, and omitting "port" is allowed for a proxy on the standard port.
+        ssl=config.get('ssl', False),
     )
 
     # Setup parser and parse arguments (if any)
