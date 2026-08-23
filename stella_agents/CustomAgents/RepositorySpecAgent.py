@@ -21,7 +21,7 @@ from stella_core.utils.request_builder import RequestBuilder
 
 from stella_agents.CustomAgents.MethodSpecAgent import (
     MethodSpecAgent, SpecExtractionError, SPEC_OUTPUT_ROOT, SPEC_SOURCE_ROOT,
-    MAX_SOURCE_CHARS)
+    MAX_SOURCE_CHARS, roots_for)
 
 # Which files are worth reading. Everything else under the root is skipped silently.
 SOURCE_SUFFIXES = tuple(
@@ -69,16 +69,17 @@ class RepositorySpecAgent(Agent):
         return answer.strip('"\'`') or "."
 
     @staticmethod
-    def _collect(directory):
+    def _collect(directory, source_root=None):
         """
         Every source file under `directory`, relative to the source root.
 
         The directory is resolved through the same containment check as a single file, so
         a path from the conversation cannot walk out of the tree.
         """
+        source_root = os.path.abspath(source_root or SPEC_SOURCE_ROOT)
         cleaned = directory.strip().strip('"\'`').lstrip("/")
-        root = os.path.abspath(os.path.join(SPEC_SOURCE_ROOT, cleaned))
-        if not (root == SPEC_SOURCE_ROOT or root.startswith(SPEC_SOURCE_ROOT + os.sep)):
+        root = os.path.abspath(os.path.join(source_root, cleaned))
+        if not (root == source_root or root.startswith(source_root + os.sep)):
             raise ValueError(f"{directory} is outside the source root")
         if not os.path.isdir(root):
             raise NotADirectoryError(f"{directory} is not a directory under the source root")
@@ -89,12 +90,12 @@ class RepositorySpecAgent(Agent):
             for name in sorted(files):
                 if name.endswith(SOURCE_SUFFIXES):
                     found.append(os.path.relpath(os.path.join(current, name),
-                                                 SPEC_SOURCE_ROOT))
+                                                 source_root))
         return sorted(found)
 
-    def _document_one(self, openai_client, relative):
+    def _document_one(self, openai_client, relative, source_root=None, output_root=None):
         """Reads and documents a single file. Never raises; failures become a record."""
-        path = os.path.join(SPEC_SOURCE_ROOT, relative)
+        path = os.path.join(source_root or SPEC_SOURCE_ROOT, relative)
         try:
             source = open(path, encoding="utf-8", errors="replace").read()
         except OSError as e:
@@ -105,7 +106,8 @@ class RepositorySpecAgent(Agent):
                     "error": f"is {len(source)} characters, over the {MAX_SOURCE_CHARS} limit"}
 
         try:
-            return MethodSpecAgent().document_source(openai_client, source, relative)
+            return MethodSpecAgent().document_source(openai_client, source, relative,
+                                                     output_root)
         except SpecExtractionError as e:
             return {"source": relative, "error": str(e)}
         except Exception as e:                                   # noqa: BLE001
@@ -113,10 +115,11 @@ class RepositorySpecAgent(Agent):
             return {"source": relative, "error": f"failed ({type(e).__name__})"}
 
     @staticmethod
-    def _write_index(directory, results):
+    def _write_index(directory, results, output_root=None):
         """An index of what was covered, so a later stage does not have to walk the tree."""
-        target = os.path.join(SPEC_OUTPUT_ROOT, INDEX_NAME)
-        os.makedirs(SPEC_OUTPUT_ROOT, exist_ok=True)
+        root = output_root or SPEC_OUTPUT_ROOT
+        target = os.path.join(root, INDEX_NAME)
+        os.makedirs(root, exist_ok=True)
         document = {
             "scanned": directory,
             "files": [
@@ -155,10 +158,11 @@ class RepositorySpecAgent(Agent):
 
     def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder,
                 chat: Chat = None, memories=None):
+        source_root, output_root = roots_for(chat)
         directory = self._find_directory(openai_client, chat, memories)
 
         try:
-            files = self._collect(directory)
+            files = self._collect(directory, source_root)
         except (ValueError, NotADirectoryError, OSError) as e:
             return (f"Could not scan {directory}: {e}. Tell the user and do not retry the "
                     f"same path.")
@@ -176,10 +180,11 @@ class RepositorySpecAgent(Agent):
         # queue is what actually bounds how many requests are in flight.
         with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
             results = list(pool.map(
-                lambda relative: self._document_one(openai_client, relative), files))
+                lambda relative: self._document_one(
+                    openai_client, relative, source_root, output_root), files))
 
         try:
-            index_name = self._write_index(directory, results)
+            index_name = self._write_index(directory, results, output_root)
         except OSError as e:
             print(f"[AGENT] {self.name} could not write the index: {e}")
             index_name = "(the index could not be written)"

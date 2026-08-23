@@ -114,6 +114,43 @@ configuration change at all:
 ssh -L 5001:localhost:5001 you@stella.example.com
 ```
 
+#### Sending files to a remote server
+
+An agent that reads files reads them on the *server's* disk, which is fine when the
+server runs on the machine holding them and useless when it does not. `/upload` sends a
+zip for the connected workspace:
+
+```
+ > /upload ~/projects/orders.zip
+[+] Unpacked 128 file(s).
+[*] Top level: orders-main
+[*] Paths you name in chat start from there.
+
+ > /source           # what this workspace has
+ > /source clear     # remove it again
+```
+
+`/download` brings back whatever the agents generated for that workspace:
+
+```
+ > /download ~/orders-spec
+[+] Wrote 5 file(s) to /Users/you/orders-spec
+[*] Start with /Users/you/orders-spec/specification.md
+```
+
+It unpacks into a directory that is empty or does not exist -- with no argument, into
+`./stella-spec-<workspace id>/` -- so a download never writes over work already there.
+This matters because the chat only ever carries a digest of what an agent produced:
+memories are re-sent on every later agent call, so the full output stays on disk.
+
+The archive is unpacked exactly as it is -- nothing is stripped or rearranged -- into a
+directory of its own per workspace, replacing whatever was there before. Paths named in
+chat are resolved inside that directory and cannot leave it. Nothing uploaded is ever
+imported or executed: `SOURCE_UPLOAD_ROOT` is checked against the directories agents are
+loaded from, and uploads are refused outright if the two ever overlap.
+
+Size, file-count and request-body ceilings are all in `app/.env_template`.
+
 ### Creating an Agent
 
 Registering an agent is two steps: STELLA has to **find** the class, and a workspace has

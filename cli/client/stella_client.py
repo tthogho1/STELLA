@@ -92,11 +92,20 @@ class StellaClient:
             return "This account does not have access to that. Try /workspace list, or /login as another user."
         return "You are not authenticated. Please login."
 
-    def auth_headers(self):
+    def auth_headers(self, json_body=True):
+        """
+        The Authorization header, and by default the JSON content type with it.
+
+        A multipart upload has to pass json_body=False: requests writes its own
+        Content-Type with the multipart boundary, and a hand-written one overrides it,
+        leaving the server unable to find the boundary and the file invisible.
+        """
         # Check if the user is logged in
         if self.session.access_token is None:
             return {}
-        headers = {"Authorization": f"Bearer {self.session.access_token}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.session.access_token}"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
         return headers
 
     def verify_connection(self):
@@ -195,6 +204,158 @@ class StellaClient:
                 print_error(f"Failed to reload agents. ({response.text})")
         except Exception as e:
             print_error(f"Failed to reload agents. ({e})")
+
+    def upload_source(self, archive_path):
+        """
+        Sends a zip of source code for the connected workspace to analyse.
+
+        This is how code reaches a server that is not running on the machine holding it.
+        The upload replaces whatever the workspace had before.
+        """
+        if self.session.workspace_id is None:
+            print_error("You are not connected to a workspace.")
+            return
+
+        path = os.path.expanduser(archive_path)
+        if not os.path.isfile(path):
+            print_error(f"No such file: {archive_path}")
+            return
+        if not zipfile.is_zipfile(path):
+            print_error(f"{archive_path} is not a zip archive.")
+            return
+
+        size = os.path.getsize(path)
+        print_info(f"Uploading {os.path.basename(path)} ({size // 1024} KB)...")
+        try:
+            with open(path, "rb") as handle:
+                response = requests.post(
+                    self.compose_url(f"workspace/{self.session.workspace_id}/source"),
+                    headers=self.auth_headers(json_body=False),
+                    files={"file": (os.path.basename(path), handle, "application/zip")})
+        except Exception as e:
+            print_error(f"Upload failed. ({e})")
+            return
+
+        if response.status_code == 200:
+            body = response.json()
+            print_success(body["msg"])
+            if body.get("entries"):
+                print_info(f"Top level: {', '.join(body['entries'])}")
+            print_info("Paths you name in chat start from there.")
+        elif response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
+        else:
+            print_error(self._server_message(response, "Upload failed"))
+
+    def describe_source(self):
+        """What the connected workspace currently has uploaded."""
+        if self.session.workspace_id is None:
+            print_error("You are not connected to a workspace.")
+            return
+        try:
+            response = requests.get(
+                self.compose_url(f"workspace/{self.session.workspace_id}/source"),
+                headers=self.auth_headers())
+        except Exception as e:
+            print_error(f"Could not read the uploaded source. ({e})")
+            return
+
+        if response.status_code != 200:
+            print_error(self._server_message(response, "Could not read the uploaded source"))
+            return
+
+        body = response.json()
+        if not body.get("uploaded"):
+            print_info("Nothing uploaded. Agents read the server's own SPEC_SOURCE_ROOT.")
+            return
+        print_success(f"{body['files']} file(s), {body['bytes'] // 1024} KB.")
+        if body.get("entries"):
+            print_info(f"Top level: {', '.join(body['entries'])}")
+
+    def delete_source(self):
+        """Removes the uploaded source, so the workspace reads the server's tree again."""
+        if self.session.workspace_id is None:
+            print_error("You are not connected to a workspace.")
+            return
+        try:
+            response = requests.delete(
+                self.compose_url(f"workspace/{self.session.workspace_id}/source"),
+                headers=self.auth_headers())
+        except Exception as e:
+            print_error(f"Could not remove the uploaded source. ({e})")
+            return
+
+        if response.status_code == 200:
+            print_success(response.json()["msg"])
+        else:
+            print_error(self._server_message(response, "Could not remove the uploaded source"))
+
+    def download_spec(self, directory=None):
+        """
+        Fetches this workspace's generated specifications and unpacks them locally.
+
+        Unpacked rather than left as a zip because the useful end state is a Markdown
+        file the user can open. Into a directory that is empty or does not exist, so a
+        download never writes over work that is already there.
+        """
+        if self.session.workspace_id is None:
+            print_error("You are not connected to a workspace.")
+            return
+
+        target = os.path.abspath(os.path.expanduser(
+            directory or f"stella-spec-{self.session.workspace_id}"))
+        if os.path.isdir(target) and os.listdir(target):
+            print_error(f"{target} is not empty. Name an empty or new directory.")
+            return
+        if os.path.exists(target) and not os.path.isdir(target):
+            print_error(f"{target} is not a directory.")
+            return
+
+        try:
+            response = requests.get(
+                self.compose_url(f"workspace/{self.session.workspace_id}/spec"),
+                headers=self.auth_headers())
+        except Exception as e:
+            print_error(f"Download failed. ({e})")
+            return
+
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
+            return
+        if response.status_code != 200:
+            print_error(self._server_message(response, "Download failed"))
+            return
+
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(response.content))
+        except zipfile.BadZipFile:
+            print_error("The server did not send a zip archive.")
+            return
+
+        # The server built this archive, but it is still writing to the user's own disk
+        # on the strength of names inside a file that arrived over the network. The same
+        # check the server applies to an upload, applied in the other direction -- it
+        # cannot be shared, since the CLI never imports the server.
+        names = [i.filename for i in archive.infolist() if not i.is_dir()]
+        for name in names:
+            if name.startswith(("/", "\\")) or ".." in name.replace("\\", "/").split("/"):
+                print_error(f"Refused the archive: it contains an out-of-tree path ({name}).")
+                return
+
+        os.makedirs(target, exist_ok=True)
+        archive.extractall(target)
+        print_success(f"Wrote {len(names)} file(s) to {target}")
+        for name in sorted(names):
+            if name.endswith(".md"):
+                print_info(f"Start with {os.path.join(target, name)}")
+
+    @staticmethod
+    def _server_message(response, fallback):
+        """The server's own explanation, which for these endpoints is the useful part."""
+        try:
+            return response.json().get("msg") or f"{fallback}. ({response.status_code})"
+        except ValueError:
+            return f"{fallback}. ({response.status_code})"
 
     def logout(self):
         if self.session.access_token:

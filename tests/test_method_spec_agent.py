@@ -391,3 +391,80 @@ class TestMethodOrdering:
             methods.sort(key=lambda m: m["line"])
 
             assert [m["method_name"] for m in methods] == ["settle", "cancel"]
+
+
+class TestUploadedWorkspaceRoots:
+    """
+    Where a workspace reads from once it has uploaded an archive (app/views/source.py).
+
+    Two properties matter. An uploaded workspace must not be able to read the server's
+    own SPEC_SOURCE_ROOT, and two workspaces must not write over each other's index.json
+    -- the second scan would otherwise inherit the first one's files with nothing in the
+    result saying so.
+    """
+
+    @pytest.fixture
+    def module(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SPEC_SOURCE_ROOT", str(tmp_path / "server"))
+        monkeypatch.setenv("SPEC_OUTPUT_ROOT", str(tmp_path / "out"))
+        monkeypatch.setenv("SOURCE_UPLOAD_ROOT", str(tmp_path / "uploads"))
+        import importlib
+        import stella_agents.CustomAgents.MethodSpecAgent as module
+        importlib.reload(module)
+        return module, tmp_path
+
+    @staticmethod
+    def _chat(workspace_id):
+        from stella_core.models.chat import Chat
+        return Chat(chat_id="1", workspace_id=workspace_id, owner="1")
+
+    def test_a_workspace_with_no_upload_uses_the_configured_roots(self, module):
+        m, tmp_path = module
+
+        assert m.roots_for(self._chat("7")) == (m.SPEC_SOURCE_ROOT, m.SPEC_OUTPUT_ROOT)
+
+    def test_no_chat_at_all_uses_the_configured_roots(self, module):
+        """Library mode: the runtime can be driven without a workspace."""
+        m, _ = module
+
+        assert m.roots_for(None) == (m.SPEC_SOURCE_ROOT, m.SPEC_OUTPUT_ROOT)
+
+    def test_an_uploaded_workspace_reads_its_own_directory(self, module):
+        m, tmp_path = module
+        (tmp_path / "uploads" / "7").mkdir(parents=True)
+
+        source_root, _ = m.roots_for(self._chat("7"))
+
+        assert source_root == str(tmp_path / "uploads" / "7")
+
+    def test_an_uploaded_workspace_cannot_reach_the_servers_own_tree(self, module):
+        m, tmp_path = module
+        (tmp_path / "uploads" / "7").mkdir(parents=True)
+        (tmp_path / "server").mkdir()
+        (tmp_path / "server" / "Secret.java").write_text("class Secret {}")
+        source_root, _ = m.roots_for(self._chat("7"))
+
+        with pytest.raises(ValueError, match="outside the source root"):
+            m.MethodSpecAgent()._resolve("../../server/Secret.java", source_root)
+
+    def test_two_uploaded_workspaces_write_to_different_places(self, module):
+        m, tmp_path = module
+        (tmp_path / "uploads" / "7").mkdir(parents=True)
+        (tmp_path / "uploads" / "8").mkdir(parents=True)
+
+        _, seven = m.roots_for(self._chat("7"))
+        _, eight = m.roots_for(self._chat("8"))
+
+        assert seven != eight
+        assert os.path.basename(seven) == "7" and os.path.basename(eight) == "8"
+
+    def test_the_specification_is_written_under_the_workspaces_output_root(self, module):
+        m, tmp_path = module
+        (tmp_path / "uploads" / "7").mkdir(parents=True)
+        _, output_root = m.roots_for(self._chat("7"))
+
+        written = m.MethodSpecAgent()._write("com/A.java", "A", [], output_root)
+
+        assert written == "com/A.java.spec.json"
+        assert os.path.isfile(os.path.join(output_root, written))
+        assert not os.path.exists(os.path.join(m.SPEC_OUTPUT_ROOT, written))

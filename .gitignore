@@ -257,3 +257,8 @@ CLAUDE.md
 
 # Generated specifications from the method spec agent
 spec_output/
+
+# Source uploaded through POST /workspace/<id>/source. Relative to the CWD, so it lands
+# under app/ when the server is started the documented way.
+app/uploads/
+uploads/

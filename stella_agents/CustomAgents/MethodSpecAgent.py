@@ -36,6 +36,31 @@ MAX_METHODS_PER_FILE = int(os.getenv("SPEC_MAX_METHODS_PER_FILE", "12"))
 # the path to it.
 SPEC_OUTPUT_ROOT = os.path.abspath(os.getenv("SPEC_OUTPUT_ROOT", "spec_output"))
 
+# Where POST /workspace/<id>/source unpacks an uploaded archive, one directory per
+# workspace. Must match SOURCE_UPLOAD_ROOT in app/views/source.py -- that is the other
+# half of this feature, and the two find each other by this path alone.
+SOURCE_UPLOAD_ROOT = os.path.abspath(os.getenv("SOURCE_UPLOAD_ROOT", "uploads"))
+
+
+def roots_for(chat):
+    """
+    Where this chat's workspace reads source from, and writes specifications to.
+
+    A workspace that has uploaded an archive reads that archive and nothing else, and
+    writes under a directory of its own: two workspaces analysing different code would
+    otherwise overwrite each other's index.json, and the second scan would silently
+    inherit the first one's files. A workspace with no upload keeps the configured
+    roots, which is what a server running on the machine that holds the code wants --
+    and what every setup predating uploads already does.
+    """
+    workspace_id = getattr(chat, "workspace_id", None) if chat is not None else None
+    if workspace_id is not None:
+        uploaded = os.path.join(SOURCE_UPLOAD_ROOT, str(workspace_id))
+        if os.path.isdir(uploaded):
+            return uploaded, os.path.join(SPEC_OUTPUT_ROOT, "workspaces", str(workspace_id))
+    return SPEC_SOURCE_ROOT, SPEC_OUTPUT_ROOT
+
+
 # How many methods the digest names before it stops. The file always has all of them.
 MAX_METHODS_IN_DIGEST = int(os.getenv("SPEC_MAX_METHODS_IN_DIGEST", "8"))
 
@@ -200,9 +225,9 @@ class MethodSpecAgent(Agent):
             forward_all_memory_entries_to_parent=True,
         )
 
-    def _resolve(self, path):
+    def _resolve(self, path, source_root=None):
         """
-        Turns a path from the conversation into a file inside SPEC_SOURCE_ROOT.
+        Turns a path from the conversation into a file inside the source root.
 
         Rejects anything outside it -- the path is chosen by a model reading user text,
         so "../../etc/passwd" is a thing that can arrive here.
@@ -210,10 +235,10 @@ class MethodSpecAgent(Agent):
         # Models like to answer with a leading slash ("/src/com/...") even when asked for
         # the path as written. Treat what comes back as relative to the root either way;
         # a genuine escape attempt is still caught by the containment check below.
+        root = os.path.abspath(source_root or SPEC_SOURCE_ROOT)
         cleaned = path.strip().strip('"\'`').lstrip("/")
-        candidate = os.path.abspath(os.path.join(SPEC_SOURCE_ROOT, cleaned))
-        if not (candidate == SPEC_SOURCE_ROOT
-                or candidate.startswith(SPEC_SOURCE_ROOT + os.sep)):
+        candidate = os.path.abspath(os.path.join(root, cleaned))
+        if not (candidate == root or candidate.startswith(root + os.sep)):
             raise ValueError(f"{path} is outside the source root")
         if not os.path.isfile(candidate):
             raise FileNotFoundError(f"{path} is not a file under the source root")
@@ -321,15 +346,16 @@ class MethodSpecAgent(Agent):
                 if o and o.strip().lower() not in {"void", "none", "no output", "n/a", "-"}]
 
     @staticmethod
-    def _write(relative_source, class_name, methods):
+    def _write(relative_source, class_name, methods, output_root=None):
         """
         Writes the full specification next to a mirror of the source tree.
 
         The output path is derived from the source path, which _resolve already confined
-        to SPEC_SOURCE_ROOT, so it cannot point outside the output root either.
-        :return: the path written, relative to SPEC_OUTPUT_ROOT
+        to the source root, so it cannot point outside the output root either.
+        :return: the path written, relative to the output root
         """
-        target = os.path.join(SPEC_OUTPUT_ROOT, relative_source + ".spec.json")
+        root = output_root or SPEC_OUTPUT_ROOT
+        target = os.path.join(root, relative_source + ".spec.json")
         os.makedirs(os.path.dirname(target), exist_ok=True)
         document = {
             "source": relative_source,
@@ -338,7 +364,7 @@ class MethodSpecAgent(Agent):
         }
         with open(target, "w", encoding="utf-8") as handle:
             json.dump(document, handle, indent=2, ensure_ascii=False)
-        return os.path.relpath(target, SPEC_OUTPUT_ROOT)
+        return os.path.relpath(target, root)
 
     @staticmethod
     def _digest(relative_source, class_name, methods, written_to):
@@ -414,7 +440,7 @@ class MethodSpecAgent(Agent):
         )
         return json.loads(reply)
 
-    def document_source(self, openai_client, source, relative):
+    def document_source(self, openai_client, source, relative, output_root=None):
         """
         Turns one file's text into a written specification.
 
@@ -500,7 +526,7 @@ class MethodSpecAgent(Agent):
 
         class_name = outline.get("class_name", "?")
         try:
-            written_to = self._write(relative, class_name, methods)
+            written_to = self._write(relative, class_name, methods, output_root)
         except OSError as e:
             print(f"[AGENT] {self.name} could not write the specification: {e}")
             raise SpecExtractionError(f"the specification could not be saved ({type(e).__name__})")
@@ -511,12 +537,13 @@ class MethodSpecAgent(Agent):
 
     def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder,
                 chat: Chat = None, memories=None):
+        source_root, output_root = roots_for(chat)
         raw_path = self._find_path(openai_client, chat, memories)
         if not raw_path:
             return "No source file was named. Ask the user which file to document."
 
         try:
-            path = self._resolve(raw_path)
+            path = self._resolve(raw_path, source_root)
             source = open(path, encoding="utf-8", errors="replace").read()
         except (ValueError, FileNotFoundError, OSError) as e:
             return (f"Could not read {raw_path}: {e}. Tell the user and do not retry the "
@@ -527,9 +554,9 @@ class MethodSpecAgent(Agent):
                     f"limit for one pass. Tell the user it has to be split, and do not "
                     f"retry it.")
 
-        relative = os.path.relpath(path, SPEC_SOURCE_ROOT)
+        relative = os.path.relpath(path, source_root)
         try:
-            result = self.document_source(openai_client, source, relative)
+            result = self.document_source(openai_client, source, relative, output_root)
         except SpecExtractionError as e:
             return (f"Could not document {relative}: {e}. Tell the user and do not "
                     f"retry this file.")

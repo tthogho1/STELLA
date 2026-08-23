@@ -24,6 +24,7 @@ from app.views.auth import auth_views
 from app.views.chat import initiate_chat_views
 from app.views.workspace import workspace_views
 from app.views.agent import agent_views
+from app.views.source import MAX_REQUEST_BYTES, source_views
 from app.views.utils import utils_views
 from app.views.user import user_views
 
@@ -72,6 +73,9 @@ def create_app(host, port):
     )
 
     app.config.from_object(flask_configs[config_name])
+    # Bounds the request body before any view sees it. Only POST
+    # /workspace/<id>/source takes a body anywhere near this size.
+    app.config['MAX_CONTENT_LENGTH'] = MAX_REQUEST_BYTES
     app.extensions['socketio'] = socketio
     app.extensions['agent_storage'] = AgentStorage(agent_dirs=[STELLA_AGENTS_DIR, DOWNLOADED_AGENTS_DIR])
     # The runtime is handed an EventSink rather than the SocketIO instance itself, so the
@@ -84,6 +88,7 @@ def create_app(host, port):
     app.register_blueprint(initiate_chat_views(socketio, app.extensions['chat_queue']))
     app.register_blueprint(workspace_views)
     app.register_blueprint(agent_views)
+    app.register_blueprint(source_views)
     app.register_blueprint(utils_views)
 
     print("Available routes:")

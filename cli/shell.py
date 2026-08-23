@@ -27,6 +27,11 @@ AVAILABLE_COMMANDS = """Available commands:
     /workspace delete <id>                      delete workspace
     /status                                     show workspace status
     /trace [task id]                            show how the last request ran
+
+    /upload <file.zip>                          send source code for agents to read
+    /source                                     show what is uploaded
+    /source clear                               remove the uploaded source
+    /download [directory]                       fetch what the agents generated
     
     /agents                                     list agents this server can add
     /add <agent id>                             add agent to workspace
@@ -255,6 +260,24 @@ class Shell:
             else:
                 self.client.install_agent(args[1])
                 return
+        elif args[0] == 'upload':
+            if len(args) == 1:
+                print_info("Missing argument. Type /help for a list of commands.")
+                return
+            # Rejoined rather than args[1]: a path chosen in a file manager very often
+            # has spaces in it, and split(' ') would otherwise upload only its first word.
+            self.client.upload_source(' '.join(args[1:]))
+            return
+        elif args[0] == 'download':
+            # Rejoined for the same reason as /upload: a chosen path often has spaces.
+            self.client.download_spec(' '.join(args[1:]) if len(args) > 1 else None)
+            return
+        elif args[0] == 'source':
+            if len(args) > 1 and args[1] == 'clear':
+                self.client.delete_source()
+            else:
+                self.client.describe_source()
+            return
         elif args[0] == 'agents':
             self.client.list_agents()
             return

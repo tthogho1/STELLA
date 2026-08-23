@@ -41,6 +41,28 @@ spec_output/
 └── specification.md        the document
 ```
 
+### Getting the code onto the server
+
+These agents read the server's disk. On a server that is not the machine holding the
+code, upload a zip for the workspace first (`/upload`, see the main README) — the
+workspace then reads that archive **instead of** `SPEC_SOURCE_ROOT`, and writes to
+`SPEC_OUTPUT_ROOT/workspaces/<workspace id>/` rather than the shared output root.
+
+Two workspaces analysing different code therefore cannot read each other's source or
+overwrite each other's `index.json`. A workspace with no upload keeps the configured
+roots, which is what a server running alongside the code wants.
+
+The archive is unpacked as it is, so a zip made from a project directory carries its
+wrapper: `/upload orders.zip` means naming `orders-main/com/example`, not `com/example`.
+`/source` prints the top level after an upload for exactly this reason. Stripping the
+wrapper automatically was tried and reverted — a single top-level directory is also what
+an archive of one package looks like, and guessing wrong breaks the path the user names.
+
+`/download` brings the generated specifications back the other way. It is the only way
+to read them off a remote server: what an agent returns into the chat is a **digest**,
+not the specification, because memories are re-sent on every later agent call and a whole
+specification there would be truncated and would crowd out everything else.
+
 ### What a specification contains
 
 Every finding carries the line it came from **and that line's source**, so a claim can be
@@ -98,6 +120,8 @@ Read from `app/.env`. See `app/.env_template` for the full list.
 | `SPEC_DB_PATTERN` | *(blank)* | Receivers counted as database access. Blank uses the default (`repo`, `dao`, `mapper`, `entitymanager`, `jdbc`, `session`) |
 | `SPEC_EXTERNAL_PATTERN` | *(blank)* | Receivers counted as leaving the system (`gateway`, `client`, `api`, `kafka`, …) |
 | `SPEC_DOCUMENT_NAME` | `specification.md` | The rendered document |
+| `SOURCE_UPLOAD_ROOT` | `uploads` | Where `/upload` unpacks an archive, one directory per workspace. Must not overlap a directory agents are imported from; uploads are refused if it does |
+| `SPEC_DOWNLOAD_MAX_BYTES` | `52428800` | Ceiling on what `/download` will zip up and send back |
 
 The two pattern settings exist for a codebase with its own naming conventions. A blank or
 unparseable value falls back to the default — an empty regular expression matches every

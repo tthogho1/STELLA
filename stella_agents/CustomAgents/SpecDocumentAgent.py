@@ -19,7 +19,8 @@ from stella_core.models.chat import Chat
 from stella_core.openai_client import OpenAIClient
 from stella_core.utils.request_builder import RequestBuilder
 
-from stella_agents.CustomAgents.MethodSpecAgent import KIND_MEANINGS, SPEC_OUTPUT_ROOT
+from stella_agents.CustomAgents.MethodSpecAgent import (
+    KIND_MEANINGS, SPEC_OUTPUT_ROOT, roots_for)
 from stella_agents.CustomAgents.RepositorySpecAgent import INDEX_NAME
 
 DOCUMENT_NAME = os.getenv("SPEC_DOCUMENT_NAME", "specification.md")
@@ -57,14 +58,15 @@ class SpecDocumentAgent(Agent):
         )
 
     @staticmethod
-    def _load():
+    def _load(output_root=None):
         """
         Reads the index and every specification it names.
 
         :return: (index, [spec, ...], [problem, ...])
         :raises FileNotFoundError: when nothing has been scanned yet
         """
-        index_path = os.path.join(SPEC_OUTPUT_ROOT, INDEX_NAME)
+        output_root = output_root or SPEC_OUTPUT_ROOT
+        index_path = os.path.join(output_root, INDEX_NAME)
         with open(index_path, encoding="utf-8") as handle:
             index = json.load(handle)
 
@@ -73,7 +75,7 @@ class SpecDocumentAgent(Agent):
             if entry.get("error"):
                 problems.append((entry["source"], entry["error"]))
                 continue
-            path = os.path.join(SPEC_OUTPUT_ROOT, entry["spec"])
+            path = os.path.join(output_root, entry["spec"])
             try:
                 with open(path, encoding="utf-8") as handle:
                     specs.append(json.load(handle))
@@ -183,8 +185,9 @@ class SpecDocumentAgent(Agent):
 
     def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder,
                 chat: Chat = None, memories=None):
+        _, output_root = roots_for(chat)
         try:
-            index, specs, problems = self._load()
+            index, specs, problems = self._load(output_root)
         except FileNotFoundError:
             return ("No specifications have been extracted yet. Tell the user to scan a "
                     "source directory first, and do not retry this.")
@@ -197,7 +200,7 @@ class SpecDocumentAgent(Agent):
                     "nothing could be written.")
 
         document = self._render(index, specs, problems)
-        target = os.path.join(SPEC_OUTPUT_ROOT, DOCUMENT_NAME)
+        target = os.path.join(output_root, DOCUMENT_NAME)
         try:
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(document)
