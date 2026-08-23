@@ -8,6 +8,8 @@ import zipfile
 import io
 from flask import current_app
 
+from app.utils.archives import extract_members, safe_members
+
 '''
 To use local webhooks, you need to install the Stripe CLI:
 stripe listen --forward-to localhost:5001/webhook
@@ -47,32 +49,6 @@ def package_manager_url():
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 
-def _safe_members(archive):
-    """
-    The entries of `archive` that are safe to extract, or ValueError explaining why not.
-
-    ZipFile.extract() already strips leading slashes and ".." components, so an entry
-    cannot escape the target directory. It does so silently though, which quietly moves
-    a file somewhere the package did not intend -- better to refuse the archive and say
-    so. The size ceiling is the part that actually protects anything.
-    """
-    members = []
-    total = 0
-    for info in archive.infolist():
-        name = info.filename
-        if "__MACOSX/" in name:
-            continue
-        if name.startswith(("/", "\\")) or ".." in name.replace("\\", "/").split("/"):
-            raise ValueError(f"the archive contains an out-of-tree path ({name})")
-        total += info.file_size
-        if total > MAX_PACKAGE_UNCOMPRESSED_BYTES:
-            raise ValueError(
-                f"the archive expands to more than "
-                f"{MAX_PACKAGE_UNCOMPRESSED_BYTES // (1024 * 1024)} MB")
-        members.append(name)
-    return members
-
-
 @agent_views.route('/agent/download', methods=['GET'])
 @jwt_required()
 def download_package():
@@ -110,14 +86,13 @@ def download_package():
 
         try:
             z = zipfile.ZipFile(io.BytesIO(response.content))
-            members = _safe_members(z)
+            members = safe_members(z, MAX_PACKAGE_UNCOMPRESSED_BYTES)
         except zipfile.BadZipFile:
             return jsonify({"msg": f"{package_name} is not a valid zip archive"}), 502
         except ValueError as e:
             return jsonify({"msg": f"Refused to install {package_name}: {e}"}), 502
 
-        for file in members:
-            z.extract(file, path=DOWNLOADED_AGENTS_DIR)
+        extract_members(z, members, DOWNLOADED_AGENTS_DIR)
 
         return f"Successfully installed {package_name}:{downloaded_version}", response.status_code
     elif response.status_code == 404:

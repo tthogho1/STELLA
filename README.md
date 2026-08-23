@@ -114,6 +114,43 @@ configuration change at all:
 ssh -L 5001:localhost:5001 you@stella.example.com
 ```
 
+#### Sending files to a remote server
+
+An agent that reads files reads them on the *server's* disk, which is fine when the
+server runs on the machine holding them and useless when it does not. `/upload` sends a
+zip for the connected workspace:
+
+```
+ > /upload ~/projects/orders.zip
+[+] Unpacked 128 file(s).
+[*] Top level: orders-main
+[*] Paths you name in chat start from there.
+
+ > /source           # what this workspace has
+ > /source clear     # remove it again
+```
+
+`/download` brings back whatever the agents generated for that workspace:
+
+```
+ > /download ~/orders-spec
+[+] Wrote 5 file(s) to /Users/you/orders-spec
+[*] Start with /Users/you/orders-spec/specification.md
+```
+
+It unpacks into a directory that is empty or does not exist -- with no argument, into
+`./stella-spec-<workspace id>/` -- so a download never writes over work already there.
+This matters because the chat only ever carries a digest of what an agent produced:
+memories are re-sent on every later agent call, so the full output stays on disk.
+
+The archive is unpacked exactly as it is -- nothing is stripped or rearranged -- into a
+directory of its own per workspace, replacing whatever was there before. Paths named in
+chat are resolved inside that directory and cannot leave it. Nothing uploaded is ever
+imported or executed: `SOURCE_UPLOAD_ROOT` is checked against the directories agents are
+loaded from, and uploads are refused outright if the two ever overlap.
+
+Size, file-count and request-body ceilings are all in `app/.env_template`.
+
 ### Creating an Agent
 
 Registering an agent is two steps: STELLA has to **find** the class, and a workspace has
@@ -160,6 +197,8 @@ loaded, marking what this workspace already has:
 
 /add my_agent
 ```
+
+An asterisk marks what this workspace already has.
 
 Until you do, the agent exists but nothing will call it. With no agents at all a
 workspace answers through `stella_welcome_agent`; add one and the coordinator takes over
@@ -210,12 +249,35 @@ delegated to, in what shape, how many times each ran, and where the time went. S
 appear in the order they were delegated, and the total is wall clock rather than the sum
 of the spans, since parallel agents overlap.
 
+### Agents That Ship With STELLA
+
+`/agents` lists these at runtime, together with anything installed since. None are added
+to a workspace until you `/add` them.
+
+**Demo agents** — small examples of the shapes an agent can take:
+
+| Agent id | What it does |
+| --- | --- |
+| `demo_weather_agent` | Fetches the weather for a city. The example to copy for calling an external API |
+| `brewery_agent` | Looks up breweries in a city |
+| `steam_agent` | Fetches data about a game |
+| `god_agent` | Adds a twist to a wish |
+| `stella/stella_cactus_agent` | Tells a story. Shows `on_completion` side effects with `skip_response` |
+
+Beyond these, [`stella_agents/CustomAgents/`](stella_agents/CustomAgents/README.md) holds
+agents that are not part of the demo set — among them a pipeline that documents source
+code with a local model. They are not listed here because they change: run `/agents` for
+what a server actually has, and read that directory's README for what each one does.
+
+`stella_coordinator_agent` and `stella_welcome_agent` are chosen automatically and are not
+added by hand.
+
 ### Repository Layout
 
 | Directory | Contents |
 | --- | --- |
 | `stella_core/` | The agent runtime — `Task`, `Agent`, `AgentStorage`, the queues, the database layer, `OpenAIClient`, `EventSink`. Imports no web framework, so it can be driven without a server. |
-| `stella_agents/` | The agents that ship with STELLA, and where your own belong. |
+| `stella_agents/` | The agents that ship with STELLA, and where your own belong. See [`CustomAgents/README.md`](stella_agents/CustomAgents/README.md) for the ones beyond the demo set, including a pipeline that documents source code with a local model. |
 | `app/` | The reference Flask + SocketIO server that wires the runtime together, plus thin re-exports so older agents importing from `app.*` keep working. |
 | `cli/` | The client. Talks to the server over HTTP and SocketIO; it never imports the server. |
 
