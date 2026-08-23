@@ -30,41 +30,41 @@ def _run_concurrently(fn, n):
     return errors
 
 
-def test_usable_from_many_real_threads(db):
+def test_usable_from_many_real_threads(sqlite_db):
     def work(i):
-        user = db.create_user(f"user{i}", b"pw")
-        workspace = db.create_workspace(user.id, f"ws{i}", {})
-        db.get_workspace(workspace.id)
-        chat = db.create_chat(workspace.id, user.id)
-        db.get_chat_by_id(chat.chat_id)
+        user = sqlite_db.create_user(f"user{i}", b"pw")
+        workspace = sqlite_db.create_workspace(user.id, f"ws{i}", {})
+        sqlite_db.get_workspace(workspace.id)
+        chat = sqlite_db.create_chat(workspace.id, user.id)
+        sqlite_db.get_chat_by_id(chat.chat_id)
 
     assert _run_concurrently(work, 20) == []
 
 
-def test_no_writes_are_lost(db):
-    _run_concurrently(lambda i: db.create_user(f"u{i}", b"pw"), 20)
-    count = db.conn.execute("SELECT COUNT(*) FROM user").fetchone()[0]
+def test_no_writes_are_lost(sqlite_db):
+    _run_concurrently(lambda i: sqlite_db.create_user(f"u{i}", b"pw"), 20)
+    count = sqlite_db.conn.execute("SELECT COUNT(*) FROM user").fetchone()[0]
     assert count == 20
 
 
-def test_read_modify_write_is_not_clobbered(db):
+def test_read_modify_write_is_not_clobbered(sqlite_db):
     """create_workspace reads a user's workspace list, appends and writes it back."""
-    user = db.create_user("solo", b"pw")
-    _run_concurrently(lambda i: db.create_workspace(user.id, f"ws{i}", {}), 15)
+    user = sqlite_db.create_user("solo", b"pw")
+    _run_concurrently(lambda i: sqlite_db.create_workspace(user.id, f"ws{i}", {}), 15)
 
-    row = db.conn.execute("SELECT workspaces FROM user WHERE id = ?", (user.id,)).fetchone()
+    row = sqlite_db.conn.execute("SELECT workspaces FROM user WHERE id = ?", (user.id,)).fetchone()
     assert len(json.loads(row["workspaces"])) == 15
 
 
-def test_reentrant_lock_does_not_deadlock(db):
+def test_reentrant_lock_does_not_deadlock(sqlite_db):
     """get_user_workspaces() calls get_workspace(); both hold the same lock."""
-    user = db.create_user("nested", b"pw")
-    db.create_workspace(user.id, "ws", {})
-    assert len(db.get_user_workspaces(user.id)) == 1
+    user = sqlite_db.create_user("nested", b"pw")
+    sqlite_db.create_workspace(user.id, "ws", {})
+    assert len(sqlite_db.get_user_workspaces(user.id)) == 1
 
 
-def test_wal_is_enabled(db):
-    assert db.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+def test_wal_is_enabled(sqlite_db):
+    assert sqlite_db.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
 
 
 def test_migrates_a_database_created_before_the_new_columns(tmp_path):

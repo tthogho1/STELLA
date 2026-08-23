@@ -2,6 +2,7 @@ import os
 from abc import ABC
 
 from bson import ObjectId
+from bson.errors import InvalidId
 from pymongo import ReturnDocument
 
 from stella_core.db.database_interface import DatabaseInterface
@@ -14,6 +15,20 @@ from stella_core.models.chat import Chat, ChatConnectionString
 
 MONGO_URI = os.getenv('MONGO_URI')
 MONGO_DB_NAME = os.getenv('MONGO_DB_NAME')
+
+
+def _object_id(value):
+    """
+    Turns an id into an ObjectId, or NotFound if it could not be one.
+
+    A caller passing an id that does not exist and one passing a malformed string are the
+    same situation to everyone above: the row is not there. Letting bson's InvalidId
+    escape instead turned a 404 into a 500.
+    """
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError):
+        raise NotFound("Not found")
 
 
 class MongoDB(DatabaseInterface, ABC):
@@ -60,7 +75,7 @@ class MongoDB(DatabaseInterface, ABC):
         }).inserted_id)
 
         # Add the workspace to the user
-        self.db.users.update_one({"_id": ObjectId(user_id)}, {"$push": {"workspaces": ObjectId(workspace_id)}})
+        self.db.users.update_one({"_id": _object_id(user_id)}, {"$push": {"workspaces": _object_id(workspace_id)}})
 
         return Workspace(
             workspace_id=workspace_id,
@@ -76,7 +91,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param user_id: The id of the user
         :return: The workspaces
         """
-        user = self.db.users.find_one({"_id": ObjectId(user_id)})
+        user = self.db.users.find_one({"_id": _object_id(user_id)})
         if user is None:
             raise NotFound("User not found")
 
@@ -99,7 +114,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param workspace_id: The id of the workspace.
         :return: The workspace
         """
-        workspace = self.db.workspaces.find_one({"_id": ObjectId(workspace_id)})
+        workspace = self.db.workspaces.find_one({"_id": _object_id(workspace_id)})
 
         if workspace is None:
             raise NotFound("Workspace not found")
@@ -118,7 +133,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param workspace_id:
         :return:
         """
-        self.db.workspaces.delete_one({"_id": ObjectId(workspace_id)})
+        self.db.workspaces.delete_one({"_id": _object_id(workspace_id)})
 
     def get_workspace_chats(self, workspace_id) -> list[str]:
         """
@@ -138,7 +153,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param user_id: The id of the user.
         :return: The user.
         """
-        user = self.db.users.find_one({"_id": ObjectId(user_id)})
+        user = self.db.users.find_one({"_id": _object_id(user_id)})
         if user is None:
             raise NotFound("User not found")
 
@@ -183,7 +198,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param chat_id: The id of the chat.
         :return: The chat.
         """
-        chat = self.db.chats.find_one({"_id": ObjectId(chat_id)})
+        chat = self.db.chats.find_one({"_id": _object_id(chat_id)})
 
         if chat is None:
             raise NotFound("Chat not found")
@@ -202,7 +217,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param task_id: The id of the task.
         :return: The task.
         """
-        task = self.db.tasks.find_one({"_id": ObjectId(task_id)})
+        task = self.db.tasks.find_one({"_id": _object_id(task_id)})
 
         print(f"Getting task {task_id}")
         if task is None:
@@ -417,7 +432,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param chat_id: The id of the chat.
         :return: None
         """
-        self.db.chats.delete_one({"_id": ObjectId(chat_id)})
+        self.db.chats.delete_one({"_id": _object_id(chat_id)})
 
     def delete_task(self, task_id) -> None:
         """
@@ -425,7 +440,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param task_id: The id of the task.
         :return: None
         """
-        self.db.tasks.delete_one({"_id": ObjectId(task_id)})
+        self.db.tasks.delete_one({"_id": _object_id(task_id)})
 
     def delete_user(self, user_id) -> None:
         """
@@ -433,7 +448,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param user_id: The id of the user.
         :return: None
         """
-        self.db.users.delete_one({"_id": ObjectId(user_id)})
+        self.db.users.delete_one({"_id": _object_id(user_id)})
 
 
     def get_user_chats(self, user_id) -> list[str]:
@@ -454,7 +469,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param task_data: The task to update.
         :return: The updated task.
         """
-        self.db.tasks.update_one({"_id": ObjectId(task_data['task_id'])}, {"$set": task_data})
+        self.db.tasks.update_one({"_id": _object_id(task_data['task_id'])}, {"$set": task_data})
         return task_data
 
     def get_top_level_task_ids(self, chat_id) -> list:
@@ -478,7 +493,7 @@ class MongoDB(DatabaseInterface, ABC):
         :param memories: The memory strings this child produced
         """
         result = self.db.tasks.update_one(
-            {"_id": ObjectId(task_id)},
+            {"_id": _object_id(task_id)},
             {"$set": {f"pending_results.{child_index}": list(memories)}}
         )
         if result.matched_count == 0:
@@ -491,7 +506,7 @@ class MongoDB(DatabaseInterface, ABC):
         :return: The counter value after the decrement, never below zero
         """
         task = self.db.tasks.find_one_and_update(
-            {"_id": ObjectId(task_id)},
+            {"_id": _object_id(task_id)},
             {"$inc": {"pending_children": -1}},
             return_document=ReturnDocument.AFTER
         )
@@ -501,7 +516,7 @@ class MongoDB(DatabaseInterface, ABC):
         remaining = task.get('pending_children', 0) or 0
         if remaining < 0:
             # Should not happen, but never hand back a negative count.
-            self.db.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"pending_children": 0}})
+            self.db.tasks.update_one({"_id": _object_id(task_id)}, {"$set": {"pending_children": 0}})
             remaining = 0
         return remaining
 

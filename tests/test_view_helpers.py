@@ -90,21 +90,29 @@ def test_the_owner_attribute_can_be_named(helper):
 class TestBackendsRaiseNotFound:
     """The helper's 404 branch only works if the backends use the typed error."""
 
-    def test_a_missing_chat(self, db):
+    def test_a_missing_chat(self, db, missing_id):
         with pytest.raises(NotFound):
-            db.get_chat_by_id("999")
+            db.get_chat_by_id(missing_id)
 
-    def test_a_missing_workspace(self, db):
+    def test_a_missing_workspace(self, db, missing_id):
         with pytest.raises(NotFound):
-            db.get_workspace("999")
+            db.get_workspace(missing_id)
 
-    def test_a_missing_task(self, db):
+    def test_a_missing_task(self, db, missing_id):
         with pytest.raises(NotFound):
-            db.get_task_data("999")
+            db.get_task_data(missing_id)
 
-    def test_a_missing_user(self, db):
+    def test_a_missing_user(self, db, missing_id):
         with pytest.raises(NotFound):
-            db.get_user_by_id("999")
+            db.get_user_by_id(missing_id)
+
+    def test_a_malformed_id_is_also_just_not_found(self, db):
+        """MongoDB ids are ObjectIds. A string that cannot be one used to escape as
+        bson.errors.InvalidId, which the view turned into a 500 instead of a 404."""
+        for lookup in (db.get_chat_by_id, db.get_workspace, db.get_task_data,
+                       db.get_user_by_id):
+            with pytest.raises(NotFound):
+                lookup("not-an-id-at-all")
 
 
 class TestClientTellsTheCodesApart:

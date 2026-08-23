@@ -15,6 +15,7 @@ Nothing in this suite makes a network request.
 """
 import os
 import tempfile
+import uuid
 
 import pytest
 
@@ -31,28 +32,91 @@ os.environ["MAX_MEMORY_ENTRY_CHARS"] = "8000"
 os.environ["MAX_CHAT_HISTORY_MESSAGES"] = "20"
 
 
-@pytest.fixture
-def db(monkeypatch):
-    """
-    A SQLite backend on its own file, so tests cannot interfere with each other.
+def _mongo_uri():
+    """The MongoDB to test against. Point STELLA_TEST_MONGO_URI elsewhere to override."""
+    return os.environ.get("STELLA_TEST_MONGO_URI", "mongodb://localhost:27017")
 
-    stella_core.db.db is a proxy that forwards to whichever backend is currently set
-    (normally by calling init_database(), which this fixture bypasses to build its own
-    throwaway SQLite directly). Every consumer -- Task, TaskManager, ChatQueue, the Flask
-    views -- holds the same proxy object, so patching the module's `_current` here is
-    enough for all of them to see the swap; nothing else needs to be patched separately.
+
+def _mongo_available(uri):
+    try:
+        import pymongo
+    except ImportError:
+        return False
+    try:
+        pymongo.MongoClient(uri, serverSelectionTimeoutMS=1500).server_info()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.fixture(params=["sqlite", "mongodb"])
+def db(request, monkeypatch):
+    """
+    A throwaway backend, once per implementation.
+
+    Every DB-backed test runs against both, because the two are not the same code: the
+    atomicity the parallel join depends on is a lock plus a read-modify-write in SQLite
+    and $inc/$set in MongoDB, and only the first was ever exercised. MongoDB is skipped
+    when there is no server to talk to, so the suite still runs anywhere.
+
+    stella_core.db.db is a proxy forwarding to whichever backend is current, so patching
+    the module's `_current` is enough for every consumer -- Task, TaskManager, ChatQueue,
+    the views -- to see the swap.
+    """
+    import stella_core.db
+
+    if request.param == "sqlite":
+        import stella_core.db.databases.sqlite as sqlite_module
+
+        path = os.path.join(tempfile.mkdtemp(prefix="stella-case-"), "case.db")
+        monkeypatch.setenv("SQLITE_DB_PATH", path)
+        monkeypatch.setattr(sqlite_module, "SQLITE_DB_PATH", path)
+        backend = sqlite_module.SQLite()
+    else:
+        uri = _mongo_uri()
+        if not _mongo_available(uri):
+            pytest.skip(f"no MongoDB at {uri}")
+
+        import pymongo
+        import stella_core.db.databases.mongodb as mongo_module
+
+        # A database of its own per test, dropped after, so cases cannot collide.
+        name = f"stella_test_{uuid.uuid4().hex[:12]}"
+        monkeypatch.setattr(mongo_module, "MONGO_URI", uri)
+        monkeypatch.setattr(mongo_module, "MONGO_DB_NAME", name)
+        backend = mongo_module.MongoDB()
+        request.addfinalizer(lambda: pymongo.MongoClient(uri).drop_database(name))
+
+    monkeypatch.setattr(stella_core.db, "_current", backend)
+
+    return backend
+
+
+@pytest.fixture
+def sqlite_db(monkeypatch):
+    """
+    A SQLite backend specifically.
+
+    tests/test_sqlite_concurrency.py is about this backend's own hazards -- one shared
+    connection, the ALTER TABLE migrations -- and reaches into db.conn, so it cannot use
+    the parametrized fixture.
     """
     import stella_core.db
     import stella_core.db.databases.sqlite as sqlite_module
 
-    path = os.path.join(tempfile.mkdtemp(prefix="stella-case-"), "case.db")
+    path = os.path.join(tempfile.mkdtemp(prefix="stella-sqlite-"), "case.db")
     monkeypatch.setenv("SQLITE_DB_PATH", path)
     monkeypatch.setattr(sqlite_module, "SQLITE_DB_PATH", path)
-
     backend = sqlite_module.SQLite()
     monkeypatch.setattr(stella_core.db, "_current", backend)
-
     return backend
+
+
+@pytest.fixture
+def missing_id(db):
+    """An id of the right shape for this backend that nothing was ever stored under."""
+    import uuid as _uuid
+    return "999999" if type(db).__name__ == "SQLite" else _uuid.uuid4().hex[:24].rjust(24, "0")
 
 
 @pytest.fixture
