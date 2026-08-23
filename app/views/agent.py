@@ -67,6 +67,31 @@ def download_package():
         return f"Failed to download package: {package_name}:{version}, {response.text}", response.status_code
     
 
+@agent_views.route('/agent', methods=['GET'])
+@jwt_required()
+def list_agents():
+    """
+    Every agent this server has loaded, so /add has something to choose from.
+
+    Without this the agent_id has to be known in advance -- /status only shows what a
+    workspace already has, not what is available to add.
+    """
+    agent_storage = current_app.extensions['agent_storage']
+
+    agents = sorted(
+        ({
+            "agent_id": agent.agent_id,
+            "name": agent.name,
+            "short_description": agent.short_description,
+            # A leaf does the work itself; one with connections delegates further down.
+            "delegates_to": sorted(agent.connections_available or {}),
+        } for agent in agent_storage),
+        key=lambda a: a["agent_id"],
+    )
+
+    return jsonify({"agents": agents, "count": len(agents)}), 200
+
+
 @agent_views.route('/agent/reload', methods=['get'])
 @jwt_required()
 def reload_agents():
