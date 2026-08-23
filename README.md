@@ -123,9 +123,15 @@ only that when deciding whether to delegate to it.
 
 Pick up the new file with `stella serve` (restart) or `GET /agent/reload`.
 
-**2. Add it to a workspace** from the CLI:
+**2. Add it to a workspace** from the CLI. `/agents` lists everything the server has
+loaded, marking what this workspace already has:
 
 ```
+/agents
+    brewery_agent               Fetch brewery data
+  * demo_weather_agent          Fetch weather data
+    my_agent                    What this agent does
+
 /add my_agent
 ```
 

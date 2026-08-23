@@ -28,6 +28,7 @@ AVAILABLE_COMMANDS = """Available commands:
     /status                                     show workspace status
     /trace [task id]                            show how the last request ran
     
+    /agents                                     list agents this server can add
     /add <agent id>                             add agent to workspace
     /remove <agent id>                          remove agent from workspace
     /coordinator <agent id>                     set workspace coordinator
@@ -254,6 +255,9 @@ class Shell:
             else:
                 self.client.install_agent(args[1])
                 return
+        elif args[0] == 'agents':
+            self.client.list_agents()
+            return
         elif args[0] == 'trace':
             self.client.get_trace(args[1] if len(args) > 1 else None)
             return

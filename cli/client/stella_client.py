@@ -461,6 +461,44 @@ class StellaClient:
         self.sio.emit("chat_message", json.dumps(json_data), namespace=self.socketio_namespace)
         self.waiting_for_response = True
 
+    def list_agents(self):
+        """
+        Prints every agent the server has loaded, marking the ones already in this
+        workspace, so /add has something to choose from.
+        """
+        response = requests.get(self.compose_url("agent"), headers=self.auth_headers())
+        if response.status_code in (401, 403):
+            print_error(self.access_error(response.status_code))
+            return
+        if response.status_code != 200:
+            print_error(f"Could not list agents ({response.status_code}).")
+            return
+
+        agents = response.json().get("agents", [])
+        if not agents:
+            print_info("This server has no agents loaded.")
+            return
+
+        # Mark what the current workspace already has, so the list is actionable.
+        in_workspace = set()
+        if self.session.workspace_id:
+            try:
+                # Returns None on 401/403 rather than raising, so do not assume a dict.
+                workspace = self.get_workspace_by_id(self.session.workspace_id) or {}
+                in_workspace = set(workspace.get("agents", {}))
+            except Exception:
+                pass
+
+        width = max(len(a["agent_id"]) for a in agents)
+        print_info(f"{len(agents)} agent(s) available. '*' is already in this workspace.")
+        for a in agents:
+            mark = "*" if a["agent_id"] in in_workspace else " "
+            line = f"  {mark} {a['agent_id']:<{width}}  {a['short_description']}"
+            if a.get("delegates_to"):
+                line += f"   -> {', '.join(a['delegates_to'])}"
+            print(line)
+        print_info("Add one with /add <agent id>.")
+
     def get_trace(self, task_id=None):
         """
         Fetches the execution trace of the last request in the current chat.
