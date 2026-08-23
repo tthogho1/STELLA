@@ -215,7 +215,7 @@ of the spans, since parallel agents overlap.
 | Directory | Contents |
 | --- | --- |
 | `stella_core/` | The agent runtime — `Task`, `Agent`, `AgentStorage`, the queues, the database layer, `OpenAIClient`, `EventSink`. Imports no web framework, so it can be driven without a server. |
-| `stella_agents/` | The agents that ship with STELLA, and where your own belong. |
+| `stella_agents/` | The agents that ship with STELLA, and where your own belong. See [`CustomAgents/README.md`](stella_agents/CustomAgents/README.md) for the ones beyond the demo set, including a pipeline that documents source code with a local model. |
 | `app/` | The reference Flask + SocketIO server that wires the runtime together, plus thin re-exports so older agents importing from `app.*` keep working. |
 | `cli/` | The client. Talks to the server over HTTP and SocketIO; it never imports the server. |
 
