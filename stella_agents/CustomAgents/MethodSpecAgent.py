@@ -10,6 +10,7 @@ for that reason -- the model is told what each value means rather than left to g
 """
 import json
 import os
+import re
 
 from stella_core.models.agent import Agent
 from stella_core.models.chat import Chat
@@ -42,19 +43,77 @@ MAX_METHODS_IN_DIGEST = int(os.getenv("SPEC_MAX_METHODS_IN_DIGEST", "8"))
 # model cites the annotation above it often enough that an exact match loses real methods.
 LINE_TOLERANCE = 3
 
+# What a finding is, decided from the source line rather than by the model.
+#
+# Line citations came back accurate every time (17 of 17), but the *kind* did not: the
+# same file, model and prompt classified all nine of one method's findings as "exception"
+# on one run -- payment and a database save included -- and correctly on another. The
+# model is reliable at saying where something happens and unreliable at saying what it is,
+# so it is asked only for the former and the latter is read off the code.
+def _pattern(name, default):
+    """
+    Compiles an overridable pattern, treating a blank setting as unset.
+
+    An empty regex matches every line, so `SPEC_DB_PATTERN=""` -- which is exactly what a
+    key shipped blank in .env_template produces -- would file the whole file as database
+    access. A bad pattern falls back rather than stopping the server: this runs at import,
+    and an agent that cannot be imported takes the rest of the scan down with it.
+    """
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return re.compile(default, re.IGNORECASE)
+    try:
+        return re.compile(value, re.IGNORECASE)
+    except re.error as e:
+        print(f"[AGENT] METHOD_SPEC {name} is not a valid regular expression ({e}); "
+              f"using the default")
+        return re.compile(default, re.IGNORECASE)
+
+
+DB_RECEIVERS = _pattern(
+    "SPEC_DB_PATTERN",
+    r"\b\w*(repo|repository|dao|mapper|entitymanager|jdbc|session)\w*\s*\.")
+EXTERNAL_RECEIVERS = _pattern(
+    "SPEC_EXTERNAL_PATTERN",
+    r"\b\w*(gateway|client|api|http|rest|feign|kafka|queue|sqs|sns|mail|smtp|"
+    r"webhook|publisher)\w*\s*\.")
+SQL_STATEMENT = re.compile(r"\b(select|insert into|update\s+\w+\s+set|delete from|merge into)\b",
+                           re.IGNORECASE)
+THROWS = re.compile(r"\bthrow\b|orElseThrow|\bcatch\s*\(")
+TRANSACTIONAL = re.compile(r"@Transactional|beginTransaction|\.commit\(|\.rollback\(")
+BRANCHES = re.compile(r"^\s*(if|else\s+if|switch|case|while|for)\b|\?.*:")
+
 KIND_MEANINGS = {
-    "db_operation": "reads or writes persistent data: repository, DAO, JPA, mapper or raw SQL",
-    "external_call": "leaves this system: HTTP, a gateway, a queue, another service",
-    "exception": "an exception this method throws or lets propagate",
-    "transaction": "transaction handling, such as an @Transactional annotation",
+    "db_operation": "reads or writes persistent data",
+    "external_call": "leaves this system",
+    "exception": "throws or propagates an exception",
+    "transaction": "transaction handling",
     "branch": "a conditional that changes what the method does",
+    "other": "a step that is none of the above",
 }
 
-# Two passes, not one. Asking a single call for the signature *and* the findings made an
-# 8B model drop the findings almost entirely: with method_name/inputs/outputs in the same
-# schema, db_operation came back empty and only two kinds were used at all; with the
-# findings alone it found every repository call. Measured on llama3.1:8b, temperature 0,
-# same file and prompt -- the only difference was the extra fields.
+
+def classify(line_text):
+    """
+    Decides what a line is, from the line itself.
+
+    Order matters: `throw new OrderLockedException(id)` inside an if-branch is an
+    exception first, and a repository call inside a transactional method is still a
+    database operation. Anything unrecognised is "other" rather than guessed at.
+    """
+    if THROWS.search(line_text):
+        return "exception"
+    if TRANSACTIONAL.search(line_text):
+        return "transaction"
+    if DB_RECEIVERS.search(line_text) or SQL_STATEMENT.search(line_text):
+        return "db_operation"
+    if EXTERNAL_RECEIVERS.search(line_text):
+        return "external_call"
+    if BRANCHES.search(line_text):
+        return "branch"
+    return "other"
+
+
 OUTLINE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -89,17 +148,12 @@ FINDINGS_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": list(KIND_MEANINGS),
-                        "description": "; ".join(
-                            f"{k}: {v}" for k, v in KIND_MEANINGS.items()),
-                    },
+                    # No "kind" here on purpose -- see classify() above.
                     "detail": {"type": "string"},
                     "line": {"type": "integer",
                              "description": "the line number shown in the input"},
                 },
-                "required": ["kind", "detail", "line"],
+                "required": ["detail", "line"],
                 "additionalProperties": False,
             },
         },
@@ -324,6 +378,14 @@ class MethodSpecAgent(Agent):
                                            f"({type(e).__name__}); it needs a manual review."]
                 continue
             method.update(detail)
+            # The model reported where; the code says what.
+            source_lines = source.splitlines()
+            for finding in method.get("findings") or []:
+                line = finding.get("line")
+                text = (source_lines[line - 1]
+                        if isinstance(line, int) and 1 <= line <= len(source_lines) else "")
+                finding["kind"] = classify(text)
+                finding["source_line"] = text.strip()
 
         if len(methods) > MAX_METHODS_PER_FILE:
             methods = methods[:MAX_METHODS_PER_FILE]

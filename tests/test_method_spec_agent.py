@@ -179,3 +179,104 @@ class TestOutputFile:
         digest = a._digest("X.java", "X", many, written)
 
         assert "and 3 more" in digest
+
+
+class TestClassification:
+    """
+    The kind of a finding is read off the source line, not asked of the model.
+
+    Line citations were accurate every time in testing; the kind was not. The same file,
+    model and prompt filed all nine of one method's findings as "exception" on one run --
+    a payment gateway call and a database save among them -- and correctly on the next.
+    """
+
+    SOURCE = {
+        11: "    @Transactional",
+        13: "        Order order = orderRepo.findById(id).orElseThrow(Missing::new);",
+        14: "        if (!force && order.isLocked()) {",
+        15: "            throw new OrderLockedException(orderId);",
+        17: '        auditLog.record("settle", orderId);',
+        18: "        paymentGateway.charge(order.getTotal());",
+        20: "        orderRepo.save(order);",
+        21: "        return receiptFactory.build(order);",
+    }
+    EXPECTED = {11: "transaction", 13: "exception", 14: "branch", 15: "exception",
+                17: "other", 18: "external_call", 20: "db_operation", 21: "other"}
+
+    def test_every_line_of_a_real_method(self, agent):
+        _, module, _ = agent
+
+        got = {n: module.classify(text) for n, text in self.SOURCE.items()}
+
+        assert got == self.EXPECTED
+
+    def test_a_throw_wins_over_the_branch_it_sits_in(self, agent):
+        _, module, _ = agent
+
+        assert module.classify("            throw new OrderLockedException(orderId);") == "exception"
+
+    def test_a_repository_call_wins_over_the_transaction_around_it(self, agent):
+        """A repository call is a database operation wherever it appears."""
+        _, module, _ = agent
+
+        assert module.classify("        orderRepo.save(order);") == "db_operation"
+
+    def test_dao_mapper_and_entitymanager_all_count_as_database(self, agent):
+        _, module, _ = agent
+
+        for line in ("customerDao.insert(c);", "orderMapper.selectById(id);",
+                     "entityManager.persist(e);", "jdbcTemplate.update(sql);"):
+            assert module.classify(line) == "db_operation", line
+
+    def test_raw_sql_counts_as_database(self, agent):
+        _, module, _ = agent
+
+        assert module.classify('String q = "SELECT * FROM orders WHERE id = ?";') == "db_operation"
+
+    def test_an_unrecognised_line_is_not_guessed_at(self, agent):
+        """Better "other" than a plausible-looking wrong label."""
+        _, module, _ = agent
+
+        assert module.classify("        order.markSettled();") == "other"
+
+    def test_the_patterns_are_configurable(self, agent, monkeypatch):
+        """A site with its own naming conventions can point these at them. The default
+        pattern matches a word *containing* the term, so a house style of `customerStore`
+        is reachable without anchoring to the start of the identifier."""
+        import importlib
+        monkeypatch.setenv("SPEC_DB_PATTERN", r"\b\w*store\w*\s*\.")
+        import stella_agents.CustomAgents.MethodSpecAgent as module
+        importlib.reload(module)
+
+        assert module.classify("customerStore.put(c);") == "db_operation"
+        assert module.classify("orderRepo.save(o);") == "other", \
+            "the override replaces the default rather than adding to it"
+
+
+class TestPatternOverrides:
+    """The keys ship blank in .env_template, and an empty regex matches every line."""
+
+    def _reload(self, monkeypatch, value):
+        import importlib
+        monkeypatch.setenv("SPEC_DB_PATTERN", value)
+        import stella_agents.CustomAgents.MethodSpecAgent as module
+        return importlib.reload(module)
+
+    def test_a_blank_setting_does_not_match_everything(self, agent, monkeypatch):
+        """SPEC_DB_PATTERN="" would otherwise file the whole file as database access."""
+        module = self._reload(monkeypatch, "")
+
+        assert module.classify("order.markSettled();") == "other"
+        assert module.classify("orderRepo.save(o);") == "db_operation", "the default is back"
+
+    def test_whitespace_counts_as_blank(self, agent, monkeypatch):
+        module = self._reload(monkeypatch, "   ")
+
+        assert module.classify("order.markSettled();") == "other"
+
+    def test_an_invalid_pattern_falls_back_instead_of_raising(self, agent, monkeypatch):
+        """This runs at import, and an agent that cannot import takes the scan down."""
+        module = self._reload(monkeypatch, "[[[not a regex")
+
+        assert module.classify("order.markSettled();") == "other"
+        assert module.classify("orderRepo.save(o);") == "db_operation"
