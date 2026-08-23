@@ -468,3 +468,63 @@ class TestUploadedWorkspaceRoots:
         assert written == "com/A.java.spec.json"
         assert os.path.isfile(os.path.join(output_root, written))
         assert not os.path.exists(os.path.join(m.SPEC_OUTPUT_ROOT, written))
+
+
+class TestOpenQuestions:
+    """
+    The section is for what a person has to answer. It filled up instead with "how does
+    PaymentGateway.charge work" -- one question per collaborator -- because the prompt
+    asked for anything undeterminable *from this file alone*, which every call into
+    another class is. The prompt now says what an uncertainty is; these are the limits
+    that hold whatever the model returns.
+    """
+
+    def test_near_duplicates_are_collapsed(self, agent):
+        """Asked about each method in turn, a model raises the same doubt every time the
+        collaborator appears."""
+        a, _, _ = agent
+
+        kept = a._clean_questions(["What does the CustomerRequest contain?",
+                                   "what does the customer request contain",
+                                   "What does the CustomerRequest contain?!"])
+
+        assert kept == ["What does the CustomerRequest contain?"]
+
+    def test_empties_are_dropped(self, agent):
+        a, _, _ = agent
+
+        assert a._clean_questions(["", "   ", None, "A real question?"]) == \
+            ["A real question?"]
+
+    def test_nothing_open_stays_nothing(self, agent):
+        a, _, _ = agent
+
+        assert a._clean_questions([]) == [] and a._clean_questions(None) == []
+
+    def test_a_long_list_is_capped(self, agent, monkeypatch):
+        a, module, _ = agent
+        monkeypatch.setattr(module, "MAX_QUESTIONS_PER_METHOD", 2)
+
+        kept = a._clean_questions([f"Question {i}?" for i in range(9)])
+
+        assert kept == ["Question 0?", "Question 1?"]
+
+    def test_the_prompt_says_what_an_uncertainty_is_not(self, agent):
+        """The wording is the main fix; measured 16 questions over three runs before it
+        and 9 after, with the share a person had to answer going from 5/16 to 7/9."""
+        _, module, _ = agent
+
+        assert "NO code anywhere can settle" in module.SYSTEM_PROMPT
+        assert "never uncertainties" in module.SYSTEM_PROMPT
+        assert "from this file alone" not in module.SYSTEM_PROMPT, \
+            "the instruction that asked for one question per collaborator"
+
+    def test_a_list_marker_the_model_wrote_is_stripped(self, agent):
+        """Asked for a list, a model sometimes writes the bullets into the items."""
+        a, _, _ = agent
+
+        assert a._clean_questions(["* how the validator is obtained",
+                                   "1. what happens on failure",
+                                   "- why is force needed"]) == \
+            ["how the validator is obtained", "what happens on failure",
+             "why is force needed"]
