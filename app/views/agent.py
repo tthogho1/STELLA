@@ -25,6 +25,21 @@ agent_views = Blueprint('agent_views', __name__)
 DOWNLOADED_AGENTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'agents'))
 
+# Where /agent/download fetches packages from. The URL used to be hardcoded here while
+# app/.env_template advertised PACKAGE_MANAGER_URL as the setting for it, so pointing the
+# server at a different index -- a private one, or a local mirror -- silently did nothing.
+# The default is the address that was hardcoded, so an existing install is unaffected.
+DEFAULT_PACKAGE_MANAGER_URL = "https://download-package-d6iaqsbjgq-uc.a.run.app"
+
+
+# A download should not hold a worker indefinitely if the index stops responding.
+PACKAGE_DOWNLOAD_TIMEOUT = 30
+
+
+def package_manager_url():
+    """Read per call, so changing it does not need a restart."""
+    return (os.getenv("PACKAGE_MANAGER_URL") or DEFAULT_PACKAGE_MANAGER_URL).rstrip("/")
+
 
 @agent_views.route('/agent/download', methods=['GET'])
 @jwt_required()
@@ -35,14 +50,21 @@ def download_package():
     if not package_name:
         return jsonify({"error": "Missing param 'query' "}), 400
 
-    url = "https://download-package-d6iaqsbjgq-uc.a.run.app"
+    url = package_manager_url()
     # Parameters for the API request
     params = {
         "query": package_name,  # Example query
         "version": version      # Set to None or omit if you want the latest version
     }
 
-    response = requests.get(url, params=params)
+    try:
+        # A configurable URL means an unreachable or wrong one is a normal thing to hit,
+        # not a bug: without this the connection error escapes as a 500 with a stack
+        # trace in the body.
+        response = requests.get(url, params=params, timeout=PACKAGE_DOWNLOAD_TIMEOUT)
+    except requests.RequestException as e:
+        print(f"[AGENT] !! Package manager at {url} could not be reached: {e}")
+        return jsonify({"msg": f"Could not reach the package manager at {url}"}), 502
 
     if response.status_code == 200:
         # Save the downloaded file
