@@ -183,6 +183,10 @@ SYSTEM_PROMPT = (
 )
 
 
+class SpecExtractionError(Exception):
+    """A file could not be documented. The message says why, for the user."""
+
+
 class MethodSpecAgent(Agent):
     """Turns one source file into a structured specification."""
 
@@ -410,25 +414,17 @@ class MethodSpecAgent(Agent):
         )
         return json.loads(reply)
 
-    def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder,
-                chat: Chat = None, memories=None):
-        raw_path = self._find_path(openai_client, chat, memories)
-        if not raw_path:
-            return "No source file was named. Ask the user which file to document."
+    def document_source(self, openai_client, source, relative):
+        """
+        Turns one file's text into a written specification.
 
-        try:
-            path = self._resolve(raw_path)
-            source = open(path, encoding="utf-8", errors="replace").read()
-        except (ValueError, FileNotFoundError, OSError) as e:
-            return (f"Could not read {raw_path}: {e}. Tell the user and do not retry the "
-                    f"same path.")
-
-        if len(source) > MAX_SOURCE_CHARS:
-            return (f"{raw_path} is {len(source)} characters, over the {MAX_SOURCE_CHARS} "
-                    f"limit for one pass. Tell the user it has to be split, and do not "
-                    f"retry it.")
-
-        relative = os.path.relpath(path, SPEC_SOURCE_ROOT)
+        Separate from respond() so the repository agent can reuse it: STELLA cannot
+        delegate to the same agent once per file (the action map holds one entry per
+        agent id and duplicate selections are collapsed), and picking files is not a
+        job that needs a model anyway.
+        :raises SpecExtractionError: with a reason the caller can put in a message
+        :return: {"relative", "class_name", "methods", "written_to"}
+        """
         numbered = self._number(source)
         print(f"[AGENT] {self.name} documenting {relative} ({len(source)} chars)")
 
@@ -443,16 +439,14 @@ class MethodSpecAgent(Agent):
                 "that are merely called from inside those bodies.",
                 OUTLINE_SCHEMA, "Outline")
         except json.JSONDecodeError:
-            return (f"The model's answer for {relative} was not the requested JSON. Tell "
-                    f"the user the extraction failed.")
+            raise SpecExtractionError("the model's answer was not the requested JSON")
         except Exception as e:
             print(f"[AGENT] {self.name} outline failed ({type(e).__name__}: {e})")
-            return (f"Could not read the methods of {relative} ({type(e).__name__}). Tell "
-                    f"the user and do not retry it.")
+            raise SpecExtractionError(f"the method list could not be read ({type(e).__name__})")
 
         methods = self._declared_only(outline.get("methods") or [], source)
         if not methods:
-            return f"No methods were found in {relative}. Tell the user."
+            raise SpecExtractionError("no methods were found")
 
         # Where each method's body ends: the line before the next declaration. Findings
         # outside that span belong to a different method -- with the whole file in the
@@ -509,8 +503,35 @@ class MethodSpecAgent(Agent):
             written_to = self._write(relative, class_name, methods)
         except OSError as e:
             print(f"[AGENT] {self.name} could not write the specification: {e}")
-            return (f"Documented {relative} but could not save it ({type(e).__name__}). "
-                    f"Tell the user the specification was not written.")
+            raise SpecExtractionError(f"the specification could not be saved ({type(e).__name__})")
 
         print(f"[AGENT] {self.name} wrote {written_to}")
-        return self._digest(relative, class_name, methods, written_to)
+        return {"relative": relative, "class_name": class_name,
+                "methods": methods, "written_to": written_to}
+
+    def respond(self, openai_client: OpenAIClient, request_builder: RequestBuilder,
+                chat: Chat = None, memories=None):
+        raw_path = self._find_path(openai_client, chat, memories)
+        if not raw_path:
+            return "No source file was named. Ask the user which file to document."
+
+        try:
+            path = self._resolve(raw_path)
+            source = open(path, encoding="utf-8", errors="replace").read()
+        except (ValueError, FileNotFoundError, OSError) as e:
+            return (f"Could not read {raw_path}: {e}. Tell the user and do not retry the "
+                    f"same path.")
+
+        if len(source) > MAX_SOURCE_CHARS:
+            return (f"{raw_path} is {len(source)} characters, over the {MAX_SOURCE_CHARS} "
+                    f"limit for one pass. Tell the user it has to be split, and do not "
+                    f"retry it.")
+
+        relative = os.path.relpath(path, SPEC_SOURCE_ROOT)
+        try:
+            result = self.document_source(openai_client, source, relative)
+        except SpecExtractionError as e:
+            return (f"Could not document {relative}: {e}. Tell the user and do not "
+                    f"retry this file.")
+        return self._digest(result["relative"], result["class_name"],
+                            result["methods"], result["written_to"])
