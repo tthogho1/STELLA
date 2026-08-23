@@ -254,3 +254,6 @@ stella
 
 # Local coding-assistant guidance, kept out of the repository
 CLAUDE.md
+
+# Generated specifications from the method spec agent
+spec_output/

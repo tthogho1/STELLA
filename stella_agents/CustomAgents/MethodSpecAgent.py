@@ -28,6 +28,20 @@ MAX_SOURCE_CHARS = int(os.getenv("SPEC_MAX_SOURCE_CHARS", "40000"))
 # let one file spend an unbounded amount of time.
 MAX_METHODS_PER_FILE = int(os.getenv("SPEC_MAX_METHODS_PER_FILE", "12"))
 
+# Where the full specification is written. The result travels up through memories, which
+# are re-sent on every later agent call and capped by MAX_MEMORY_ENTRY_CHARS -- a whole
+# specification there would be truncated and would crowd out everything else. The file
+# holds the structured form for whatever builds the document; memories get a digest and
+# the path to it.
+SPEC_OUTPUT_ROOT = os.path.abspath(os.getenv("SPEC_OUTPUT_ROOT", "spec_output"))
+
+# How many methods the digest names before it stops. The file always has all of them.
+MAX_METHODS_IN_DIGEST = int(os.getenv("SPEC_MAX_METHODS_IN_DIGEST", "8"))
+
+# How far from the cited line to look for the declaration. Asked for the signature line, a
+# model cites the annotation above it often enough that an exact match loses real methods.
+LINE_TOLERANCE = 3
+
 KIND_MEANINGS = {
     "db_operation": "reads or writes persistent data: repository, DAO, JPA, mapper or raw SQL",
     "external_call": "leaves this system: HTTP, a gateway, a queue, another service",
@@ -157,47 +171,86 @@ class MethodSpecAgent(Agent):
         return "\n".join(f"{i:>4}: {line}" for i, line in enumerate(source.splitlines(), 1))
 
     @staticmethod
-    def _render(class_name, path, methods):
+    def _write(relative_source, class_name, methods):
         """
-        The one string that goes up into memories.
+        Writes the full specification next to a mirror of the source tree.
 
-        Compact on purpose: it is re-sent on every later agent call, so the full JSON
-        would crowd out everything else the coordinator is holding.
+        The output path is derived from the source path, which _resolve already confined
+        to SPEC_SOURCE_ROOT, so it cannot point outside the output root either.
+        :return: the path written, relative to SPEC_OUTPUT_ROOT
         """
-        lines = [f"Specification extracted from {path} (class {class_name}):"]
-        for method in methods:
-            lines.append(f"- {method['method_name']}({', '.join(method.get('inputs') or [])})"
-                         f" -> {', '.join(method.get('outputs') or ['void'])}")
-            if method.get("responsibility"):
-                lines.append(f"    {method['responsibility']}")
-            for finding in method.get("findings", []):
-                lines.append(f"    [{finding['kind']}] L{finding['line']}: {finding['detail']}")
-            for question in method.get("uncertainties", []):
-                lines.append(f"    [?] {question}")
+        target = os.path.join(SPEC_OUTPUT_ROOT, relative_source + ".spec.json")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        document = {
+            "source": relative_source,
+            "class_name": class_name,
+            "methods": methods,
+        }
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2, ensure_ascii=False)
+        return os.path.relpath(target, SPEC_OUTPUT_ROOT)
+
+    @staticmethod
+    def _digest(relative_source, class_name, methods, written_to):
+        """
+        The short form that goes up into memories.
+
+        Names what was covered and where the detail is, without carrying the findings
+        themselves -- a coordinator deciding what to do next needs to know the file was
+        handled, not what line 20 does.
+        """
+        total_findings = sum(len(m.get("findings") or []) for m in methods)
+        open_questions = sum(len(m.get("uncertainties") or []) for m in methods)
+
+        lines = [f"Documented {relative_source} (class {class_name}): "
+                 f"{len(methods)} method(s), {total_findings} finding(s), "
+                 f"{open_questions} open question(s)."]
+        for method in methods[:MAX_METHODS_IN_DIGEST]:
+            kinds = sorted({f["kind"] for f in (method.get("findings") or [])})
+            lines.append(f"  - {method['method_name']}"
+                         f"({', '.join(method.get('inputs') or [])})"
+                         f" -> {', '.join([o for o in (method.get('outputs') or []) if o]) or 'void'}"
+                         + (f"  [{', '.join(kinds)}]" if kinds else ""))
+        if len(methods) > MAX_METHODS_IN_DIGEST:
+            lines.append(f"  - ... and {len(methods) - MAX_METHODS_IN_DIGEST} more")
+        lines.append(f"The full specification with line numbers is in {written_to} "
+                     f"under the spec output directory. Do not re-analyse this file.")
         return "\n".join(lines)
 
     @staticmethod
     def _declared_only(methods, source):
         """
-        Drops entries whose cited line is not actually a declaration.
+        Drops entries whose cited line is not a declaration, and corrects the line if it
+        is close.
 
-        The outline pass returns called methods as well as declared ones, and the line it
-        cites is the giveaway: a real declaration has the method name followed by a
-        parameter list, not a call inside another body.
+        The outline pass returns methods the class calls as well as those it declares, and
+        the cited line tells them apart: a declaration names the method followed by its
+        parameter list, a call has a receiver in front of it. The line is allowed to be a
+        couple off, because a model asked for the signature line will happily cite the
+        @Transactional annotation above it instead.
         """
         lines = source.splitlines()
         kept = []
         for method in methods:
             line = method.get("line")
-            if not isinstance(line, int) or not (1 <= line <= len(lines)):
+            name = method.get("method_name") or ""
+            if not name or not isinstance(line, int):
                 continue
-            text = lines[line - 1]
-            name = method.get("method_name", "")
-            # a declaration mentions the name and is not itself a call on something else
-            if name and f"{name}(" in text and f".{name}(" not in text:
-                kept.append(method)
-            else:
-                print(f"[AGENT] METHOD_SPEC dropping {name!r}: L{line} is not a declaration")
+
+            found = None
+            for candidate in range(max(1, line - LINE_TOLERANCE),
+                                   min(len(lines), line + LINE_TOLERANCE) + 1):
+                text = lines[candidate - 1]
+                if f"{name}(" in text and f".{name}(" not in text:
+                    found = candidate
+                    break
+            if found is None:
+                print(f"[AGENT] METHOD_SPEC dropping {name!r}: no declaration near L{line}")
+                continue
+            if found != line:
+                print(f"[AGENT] METHOD_SPEC {name!r} declared on L{found}, not L{line}")
+            method["line"] = found
+            kept.append(method)
         return kept
 
     def _ask(self, openai_client, numbered, instruction, schema, name):
@@ -278,4 +331,13 @@ class MethodSpecAgent(Agent):
                                            f"further methods not analysed)",
                             "inputs": [], "outputs": [], "findings": [], "uncertainties": []})
 
-        return self._render(outline.get("class_name", "?"), relative, methods)
+        class_name = outline.get("class_name", "?")
+        try:
+            written_to = self._write(relative, class_name, methods)
+        except OSError as e:
+            print(f"[AGENT] {self.name} could not write the specification: {e}")
+            return (f"Documented {relative} but could not save it ({type(e).__name__}). "
+                    f"Tell the user the specification was not written.")
+
+        print(f"[AGENT] {self.name} wrote {written_to}")
+        return self._digest(relative, class_name, methods, written_to)

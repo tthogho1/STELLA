@@ -104,22 +104,78 @@ class TestNumbering:
         assert numbered.splitlines()[1].strip().startswith("2: second")
 
 
-class TestRendering:
-    def test_a_finding_keeps_its_line(self, agent):
-        a, _, _ = agent
-        out = a._render("BillingService", "Billing.java", [
-            {"method_name": "settle", "inputs": ["String"], "outputs": ["Receipt"],
-             "responsibility": "Settles an order",
-             "findings": [{"kind": "db_operation", "detail": "orderRepo.save", "line": 20}],
-             "uncertainties": ["Is the order number unique across the company?"]}])
+class TestOutputFile:
+    """The full specification goes to a file; memories get a digest and the path."""
 
-        assert "settle(String) -> Receipt" in out
-        assert "[db_operation] L20: orderRepo.save" in out
-        assert "[?] Is the order number unique" in out
+    METHODS = [
+        {"method_name": "settle", "inputs": ["String"], "outputs": ["Receipt"], "line": 12,
+         "responsibility": "Settles an order",
+         "findings": [{"kind": "db_operation", "detail": "orderRepo.save", "line": 20},
+                      {"kind": "external_call", "detail": "paymentGateway.charge", "line": 18}],
+         "uncertainties": ["Is the order number unique across the company?"]},
+        {"method_name": "cancel", "inputs": [], "outputs": [], "line": 24,
+         "responsibility": "Cancels an order", "findings": [], "uncertainties": []},
+    ]
 
-    def test_a_method_with_no_outputs_reads_as_void(self, agent):
-        a, _, _ = agent
-        out = a._render("C", "C.java", [{"method_name": "cancel", "inputs": [],
-                                         "outputs": [], "findings": [], "uncertainties": []}])
+    def _write(self, agent, monkeypatch, tmp_path):
+        a, module, _ = agent
+        out = tmp_path / "out"
+        monkeypatch.setattr(module, "SPEC_OUTPUT_ROOT", str(out))
+        written = a._write("com/example/Billing.java", "BillingService", self.METHODS)
+        return a, module, out, written
 
-        assert "cancel() -> void" in out
+    def test_the_file_mirrors_the_source_path(self, agent, monkeypatch, tmp_path):
+        _, _, out, written = self._write(agent, monkeypatch, tmp_path)
+
+        assert written == "com/example/Billing.java.spec.json"
+        assert (out / written).is_file()
+
+    def test_the_file_keeps_every_finding_with_its_line(self, agent, monkeypatch, tmp_path):
+        import json
+        _, _, out, written = self._write(agent, monkeypatch, tmp_path)
+
+        document = json.loads((out / written).read_text())
+
+        assert document["source"] == "com/example/Billing.java"
+        assert document["class_name"] == "BillingService"
+        settle = document["methods"][0]
+        assert [(f["kind"], f["line"]) for f in settle["findings"]] == [
+            ("db_operation", 20), ("external_call", 18)]
+        assert settle["uncertainties"] == ["Is the order number unique across the company?"]
+
+    def test_the_digest_says_where_the_detail_is(self, agent, monkeypatch, tmp_path):
+        a, _, _, written = self._write(agent, monkeypatch, tmp_path)
+
+        digest = a._digest("com/example/Billing.java", "BillingService", self.METHODS, written)
+
+        assert written in digest
+        assert "2 method(s), 2 finding(s), 1 open question(s)" in digest
+        assert "do not re-analyse" in digest.lower()
+
+    def test_the_digest_does_not_carry_the_findings(self, agent, monkeypatch, tmp_path):
+        """Memories are re-sent on every later agent call; the detail stays in the file."""
+        a, _, _, written = self._write(agent, monkeypatch, tmp_path)
+
+        digest = a._digest("com/example/Billing.java", "BillingService", self.METHODS, written)
+
+        assert "orderRepo.save" not in digest
+        assert "L20" not in digest
+        assert len(digest) < 500
+
+    def test_the_digest_still_names_the_methods(self, agent, monkeypatch, tmp_path):
+        a, _, _, written = self._write(agent, monkeypatch, tmp_path)
+
+        digest = a._digest("com/example/Billing.java", "BillingService", self.METHODS, written)
+
+        assert "settle(String) -> Receipt" in digest
+        assert "cancel() -> void" in digest
+
+    def test_a_long_class_is_summarised_not_listed(self, agent, monkeypatch, tmp_path):
+        a, module, _, written = self._write(agent, monkeypatch, tmp_path)
+        monkeypatch.setattr(module, "MAX_METHODS_IN_DIGEST", 2)
+        many = [{"method_name": f"m{i}", "inputs": [], "outputs": [], "findings": [],
+                 "uncertainties": []} for i in range(5)]
+
+        digest = a._digest("X.java", "X", many, written)
+
+        assert "and 3 more" in digest
